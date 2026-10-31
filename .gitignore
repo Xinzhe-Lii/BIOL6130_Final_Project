@@ -1,0 +1,29 @@
+# R and editor state
+.Rhistory
+.RData
+.Ruserdata
+.Renviron
+.Rproj.user/
+.vscode/
+
+# Quarto and LaTeX build files
+.quarto/
+*_files/
+*_cache/
+*.knit.md
+*.utf8.md
+*.tex
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Local assistant settings and operating-system files
+.codex/
+.agents/
+AGENTS.md
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+~$*
