@@ -27,3 +27,6 @@ AGENTS.md
 Thumbs.db
 *:Zone.Identifier
 ~$*
+
+# WorldClim permits local academic use, but not raw-data redistribution
+Raw Data/*wc2.1*.tif

@@ -1,3 +1,3 @@
 # Generative AI Use
 
-OpenAI Codex was used as a coding assistant for the initial repository setup, including folder organisation, configuration, and writing and checking R/Quarto setup code.
+OpenAI Codex was used to help set up folders, download data, and write and revise code.

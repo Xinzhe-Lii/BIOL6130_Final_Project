@@ -1,0 +1,139 @@
+---
+title: "BIOL6130 Final Project: data preparation"
+format:
+  pdf:
+    pdf-engine: pdflatex
+    fig-width: 7
+    fig-height: 6.5
+    fig-format: png
+    fig-dpi: 200
+    fig-pos: H
+execute:
+  echo: true
+  message: false
+---
+
+## Read the data
+
+```{r}
+#| message: false
+library(sf)
+library(terra)
+library(dplyr)
+library(ggplot2)
+library(tidyterra)
+
+photo_2018 <- rast("Raw Data/dgt_ortho2018_context.tif")
+photo_2025 <- rast("Raw Data/dgt_ortho2025_context.tif")
+land_cover <- read_sf("Raw Data/cos2018_land_cover.geojson")
+forest_2018 <- read_sf("Raw Data/cos2018_eucalyptus.geojson")
+forest_2025 <- read_sf("Raw Data/cos2025_eucalyptus.geojson")
+road <- read_sf("Raw Data/cos2018_roads.geojson") %>%
+  filter(ogc_fid == 147070)
+
+# Crop climate data to the current B window.
+area <- as.polygons(ext(photo_2018), crs = crs(photo_2018))
+window <- project(area, "EPSG:4326")
+climate_file <- "Raw Data/PRT_wc2.1_30s_bio.tif"
+climate_url <- paste0(
+  "https://geodata.ucdavis.edu/climate/worldclim/2_1/tiles/iso/",
+  "PRT_wc2.1_30s_bio.tif")
+if (!file.exists(climate_file)) {
+  download.file(climate_url, climate_file, mode = "wb", quiet = TRUE)
+}
+climate <- rast(climate_file)[[c(1, 12)]] %>%
+  crop(window, snap = "out")
+names(climate) <- c("temperature", "precipitation")
+```
+
+## Inspect the contents
+
+```{r}
+glimpse(land_cover, width = 75)
+```
+
+## Draw the maps
+
+B is the current preview window. The focal road is COS ID 147070; side roads
+are deferred. Sampling will focus on land not mapped as eucalyptus in 2018.
+The final sampling extent and distance groups remain undecided.
+
+The climate maps show 1970--2000 averages at 30-arc-second resolution
+(about 710 by 925 m here). The 2025 aerial image provides geographic context.
+
+```{r}
+# tidyterra draws the photograph; ggplot2 adds the data layer and map layout.
+draw_map <- function(photo, layer, title) {
+  ggplot() +
+    geom_spatraster_rgb(data = photo, interpolate = FALSE,
+                        maxcell = ncell(photo)) +
+    layer +
+    coord_sf(crs = 3763, datum = st_crs(3763), expand = FALSE,
+             xlim = c(xmin(photo), xmax(photo)),
+             ylim = c(ymin(photo), ymax(photo))) +
+    labs(title = title, x = "Easting (m)", y = "Northing (m)",
+         caption = "Aerial imagery: DGT (CC BY 4.0) | EPSG:3763") +
+    theme_minimal()
+}
+```
+
+```{r}
+draw_map(photo_2018,
+         geom_sf(data = road, fill = "#FFD166", colour = NA),
+         "Selected main road, 2018")
+```
+
+```{r}
+draw_map(photo_2018,
+         geom_sf(data = forest_2018, fill = "#00BFE8",
+                 colour = NA, alpha = 0.4),
+         "Eucalyptus forest, 2018")
+```
+
+```{r}
+draw_map(photo_2025,
+         geom_sf(data = forest_2025, fill = "#00BFE8",
+                 colour = NA, alpha = 0.4),
+         "Eucalyptus forest, 2025")
+```
+
+```{r}
+# Keep the original climate cells and values.
+cells <- as.polygons(climate, aggregate = FALSE, round = FALSE) %>%
+  st_as_sf()
+draw_map(photo_2025,
+         geom_sf(data = cells, aes(fill = temperature),
+                 colour = "white", alpha = 0.55),
+         "Mean temperature, 1970-2000 (30 arcsec)") +
+  scale_fill_viridis_c(name = "degrees C")
+```
+
+```{r}
+draw_map(photo_2025,
+         geom_sf(data = cells, aes(fill = precipitation),
+                 colour = "white", alpha = 0.55),
+         "Annual precipitation, 1970-2000 (30 arcsec)") +
+  scale_fill_viridis_c(name = "mm/year")
+```
+
+## Sources and use
+
+
+- [Direcao-Geral do Territorio (DGT)](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-tematica/SMOS-CLMS):
+  COS2018v4 and COS2025v1, CC BY 4.0. The 2018 inputs were downloaded on
+  2 November 2026; the 2025 input is the verified 28 October 2026 snapshot.
+- [DGT orthophotography](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-topografica/ortofotos/ortofotos-digitais):
+  2018 and 2025 true-colour aerial imagery, CC BY 4.0.
+  The original product has 25 cm pixels; these WMS background exports use
+  a 2 m display grid for area B and were downloaded on 4 November 2026.
+- [Copernicus GLO-30](https://registry.opendata.aws/copernicus-dem/):
+  surface elevation, under the [Copernicus DEM licence](https://dataspace.copernicus.eu/sites/default/files/media/files/2025-06/copernicus_contributing_mission_data_access_v2_cop_dem_licenses.pdf).
+  © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
+  under COPERNICUS by the European Union and ESA; all rights reserved.
+- [WorldClim 2.1](https://www.worldclim.org/data/worldclim21.html):
+  BIO1 and BIO12 from the Portugal file, 1970--2000, 30-arc-second resolution;
+  Fick and Hijmans (2017), [doi:10.1002/joc.5086](https://doi.org/10.1002/joc.5086).
+  The TIFF is downloaded from WorldClim when absent and is excluded from Git
+  because [redistribution requires permission](https://www.worldclim.org/about.html).
+
+Map functions: [tidyterra](https://github.com/dieghernan/tidyterra) and [ggplot2](https://ggplot2.tidyverse.org/reference/ggsf.html).
