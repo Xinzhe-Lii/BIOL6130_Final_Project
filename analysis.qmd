@@ -3,6 +3,12 @@ title: "BIOL6130 Final Project: data preparation"
 format:
   pdf:
     pdf-engine: pdflatex
+    latex-auto-install: false
+    papersize: a4
+    fontsize: 11pt
+    geometry: margin=22mm
+    colorlinks: true
+    urlcolor: teal
     fig-width: 7
     fig-height: 6.5
     fig-format: png
@@ -13,7 +19,11 @@ execute:
   message: false
 ---
 
-## Read the data
+## Pilot study in area B
+
+The initial study used a 4 km by 4 km window to inspect the land-cover data and one main road. The regional maps and environmental table follow this pilot.
+
+### Read the data
 
 ```{r}
 #| message: false
@@ -46,17 +56,15 @@ climate <- rast(climate_file)[[c(1, 12)]] %>%
 names(climate) <- c("temperature", "precipitation")
 ```
 
-## Inspect the contents
+### Inspect the contents
 
 ```{r}
 glimpse(land_cover, width = 75)
 ```
 
-## Draw the maps
+### Draw the pilot maps
 
-B is the current preview window. The focal road is COS ID 147070; side roads
-are deferred. Sampling will focus on land not mapped as eucalyptus in 2018.
-The final sampling extent and distance groups remain undecided.
+The pilot focused on the main road recorded as COS ID 147070. The yellow overlay marks this road within area B.
 
 The climate maps show 1970--2000 averages at 30-arc-second resolution
 (about 710 by 925 m here). The 2025 aerial image provides geographic context.
@@ -116,24 +124,199 @@ draw_map(photo_2025,
   scale_fill_viridis_c(name = "mm/year")
 ```
 
-## Sources and use
+\newpage
 
+## Regional eucalyptus forest cover
 
-- [Direcao-Geral do Territorio (DGT)](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-tematica/SMOS-CLMS):
-  COS2018v4 and COS2025v1, CC BY 4.0. The 2018 inputs were downloaded on
-  2 November 2026; the 2025 input is the verified 28 October 2026 snapshot.
-- [DGT orthophotography](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-topografica/ortofotos/ortofotos-digitais):
-  2018 and 2025 true-colour aerial imagery, CC BY 4.0.
-  The original product has 25 cm pixels; these WMS background exports use
-  a 2 m display grid for area B and were downloaded on 4 November 2026.
-- [Copernicus GLO-30](https://registry.opendata.aws/copernicus-dem/):
-  surface elevation, under the [Copernicus DEM licence](https://dataspace.copernicus.eu/sites/default/files/media/files/2025-06/copernicus_contributing_mission_data_access_v2_cop_dem_licenses.pdf).
-  © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
-  under COPERNICUS by the European Union and ESA; all rights reserved.
-- [WorldClim 2.1](https://www.worldclim.org/data/worldclim21.html):
-  BIO1 and BIO12 from the Portugal file, 1970--2000, 30-arc-second resolution;
-  Fick and Hijmans (2017), [doi:10.1002/joc.5086](https://doi.org/10.1002/joc.5086).
-  The TIFF is downloaded from WorldClim when absent and is excluded from Git
-  because [redistribution requires permission](https://www.worldclim.org/about.html).
+```{r}
+#| label: setup
+#| include: false
+input <- function(name) file.path("Raw Data", name)
+study_area <- st_read(input("land_cover.gpkg"), "study_area", quiet = TRUE) %>%
+  st_geometry()
+```
 
-Map functions: [tidyterra](https://github.com/dieghernan/tidyterra) and [ggplot2](https://ggplot2.tidyverse.org/reference/ggsf.html).
+```{r}
+#| label: prepare-forest-maps
+#| include: false
+forest_in_region <- function(year) {
+  forest <- st_read(input("land_cover.gpkg"), layer = paste0("euc", year), quiet = TRUE)
+  inside <- st_intersection(st_geometry(forest), st_geometry(study_area))
+  st_union(inside[st_dimension(inside) == 2])
+}
+
+forest18 <- forest_in_region(2018)
+forest25 <- forest_in_region(2025)
+changes <- st_sf(
+  cover = c("Retained", "Gained", "Lost"),
+  geometry = c(st_intersection(forest18, forest25),
+               st_difference(forest25, forest18),
+               st_difference(forest18, forest25))
+)
+areas_ha <- function(x) as.numeric(st_area(x)) / 10000
+forest_area_ha <- c("2018" = areas_ha(forest18), "2025" = areas_ha(forest25),
+                    setNames(areas_ha(changes), c("Retained", "Gain", "Loss")))
+hectares <- function(x) paste0(format(round(x), big.mark = ",", trim = TRUE), " ha")
+
+map_forest <- function(features, colours, heading, detail, source) {
+  ggplot() +
+    geom_sf(data = study_area, aes(fill = "Other cover"), colour = NA) +
+    geom_sf(data = features, aes(fill = cover), colour = NA) +
+    geom_sf(data = study_area, fill = NA, colour = "grey48", linewidth = 0.25) +
+    scale_fill_manual(NULL, values = colours, breaks = names(colours)) +
+    coord_sf(datum = st_crs(4326), expand = FALSE) +
+    labs(title = heading, subtitle = detail, x = NULL, y = NULL,
+         caption = paste0("Central Portugal  |  North up  |  Map width approximately 34 km\n",
+                          "Land cover: DGT, ", source, " (CC BY 4.0).")) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid = element_blank(), legend.position = "bottom",
+          legend.key = element_rect(colour = "grey78", fill = NA, linewidth = 0.2),
+          plot.title.position = "plot", plot.title = element_text(face = "bold", size = 17),
+          plot.caption.position = "plot", plot.caption = element_text(hjust = 0))
+}
+
+annual_colours <- c("Eucalyptus forest" = "#286850", "Other cover" = "#F7F6F1")
+annual_map <- function(forest, year, source) {
+  features <- st_sf(cover = "Eucalyptus forest", geometry = forest)
+  map_forest(features, annual_colours, paste("Eucalyptus forest in", year),
+             paste("Mapped forest area:", hectares(forest_area_ha[year])), source)
+}
+change_detail <- paste("Gained", hectares(forest_area_ha["Gain"]), " |  Lost",
+                       hectares(forest_area_ha["Loss"]), " |  Retained",
+                       hectares(forest_area_ha["Retained"]))
+maps <- list(
+  "2018" = annual_map(forest18, "2018", "COS2018v4"),
+  "2025" = annual_map(forest25, "2025", "COS2025v1"),
+  "change" = map_forest(changes,
+    c("Gained" = "#006792", "Lost" = "#BF430D", "Retained" = "#CED9CC",
+      "Other cover" = "#F7F6F1"),
+    "Eucalyptus forest change, 2018 to 2025", change_detail,
+    "COS2018v4 and COS2025v1")
+)
+```
+
+```{r}
+#| label: forest-2018
+#| echo: false
+#| dev: pdf
+#| fig-width: 6.6
+#| fig-height: 6.9
+maps[["2018"]]
+```
+
+The map covers the full study window near Coimbra, central Portugal (8.50–8.10°W and 40.025–40.325°N). Green shows every polygon classified as eucalyptus-dominated forest in the 2018 Portuguese land-cover map.
+
+\newpage
+
+```{r}
+#| label: forest-2025
+#| echo: false
+#| dev: pdf
+#| fig-width: 6.6
+#| fig-height: 6.9
+maps[["2025"]]
+```
+
+The 2025 map uses the same boundary, scale and eucalyptus class as the 2018 map. Each annual area is measured from the original land-cover polygons clipped to that boundary.
+
+\newpage
+
+```{r}
+#| label: forest-change
+#| echo: false
+#| dev: pdf
+#| fig-width: 6.6
+#| fig-height: 6.9
+maps[["change"]]
+```
+
+Blue marks land mapped as eucalyptus only in 2025. Orange marks land mapped as eucalyptus only in 2018. Pale green marks areas mapped as eucalyptus in both years. The net gain was **`r sprintf("%.1f", forest_area_ha["Gain"] - forest_area_ha["Loss"])` ha**. The map records a change in the dominant cover class. Individual seedlings, planting dates and routes of seed arrival cannot be identified from these polygons.
+
+\newpage
+
+## Environment table
+
+```{r}
+#| label: environmental-locations
+#| include: false
+bounds <- st_bbox(study_area)
+centres <- function(lo, hi) seq(floor(lo / 80) * 80 + 40, hi, by = 80)
+sites <- expand.grid(x_m = centres(bounds["xmin"], bounds["xmax"]),
+                     y_m = centres(bounds["ymin"], bounds["ymax"])) %>%
+  st_as_sf(coords = c("x_m", "y_m"), crs = 3763, remove = FALSE)
+sites <- sites[lengths(st_within(sites, study_area)) > 0, ]
+
+land18 <- st_read(input("land_cover.gpkg"), "land2018", quiet = TRUE)
+hit <- st_intersects(sites, land18)
+land_row <- rep(NA_integer_, nrow(sites))
+unique_hit <- lengths(hit) == 1L
+land_row[unique_hit] <- unlist(hit[unique_hit], use.names = FALSE)
+
+fires <- st_read(input("fires.gpkg"), "fires", quiet = TRUE)
+in_fire_2017 <- lengths(st_intersects(sites, filter(fires, year == 2017))) > 0
+in_fire_2018_25 <- lengths(st_intersects(sites, filter(fires, between(year, 2018, 2025)))) > 0
+```
+
+```{r}
+#| label: sample-environmental-rasters
+#| include: false
+at_sites <- function(layer, cells = FALSE) {
+  xy <- st_transform(sites, crs(layer)) %>% st_coordinates()
+  terra::extract(layer, xy, cells = cells)
+}
+regional_climate <- at_sites(rast(input("climate.tif")), cells = TRUE)
+dsm <- rast(input("copernicus_glo30.tif"))
+# Keep surrounding source cells for slope at the edge of the study window.
+terrain_bounds <- ext(vect(st_transform(study_area, crs(dsm))))
+dsm <- crop(dsm, extend(terrain_bounds, 2 * res(dsm)[1]), snap = "out")
+slope <- terrain(dsm, v = "slope", unit = "degrees", neighbors = 8)
+terrain_values <- at_sites(c(dsm, slope))
+dnbr <- at_sites(rast(input("fire_dnbr_2017.tif")))[[1]]
+suitability <- at_sites(rast(input("fire_confidence_2017.tif")))[[1]]
+
+management <- rast(input("forest_management_2015.tif"))
+management_code <- at_sites(management)[[1]]
+planted <- ifel(management == 31 | management == 32, 1, NA)
+planted_cells <- as.polygons(planted, dissolve = FALSE, na.rm = TRUE) %>%
+  st_as_sf() %>% st_transform(3763) %>% st_geometry()
+nearest <- st_nearest_feature(sites, planted_cells)
+planted_m <- as.numeric(st_distance(st_geometry(sites), planted_cells[nearest],
+                                    by_element = TRUE))
+crop_edge <- as.polygons(management, extent = TRUE) %>% st_as_sf() %>%
+  st_transform(3763) %>% st_boundary()
+edge_m <- as.numeric(st_distance(sites, crop_edge))
+```
+
+```{r}
+#| label: write-environment-table
+#| include: false
+environment <- sites %>% st_drop_geometry() %>%
+  mutate(site_id = paste(x_m, y_m, sep = "_"), .before = 1) %>%
+  mutate(cos_2018_code = land18$cover_code[land_row],
+         cos_2018_label = land18$cover_name[land_row],
+         chelsa_cell = regional_climate$cell, temp_mean_c = regional_climate$temp_c,
+         precip_annual_mm = regional_climate$precip_mm, wind_speed_ms = regional_climate$wind_speed_ms,
+         elevation_m = terrain_values[[1]],
+         slope_deg = terrain_values[[2]], burned_perimeter_2017 = in_fire_2017,
+         dnbr_2017 = dnbr, image_suitability_2017_pct = suitability,
+         management_2015_code = management_code,
+         planted_forest_2015_m = if_else(planted_m <= edge_m, planted_m, NA_real_),
+         burned_perimeter_2018_2025 = in_fire_2018_25)
+readr::write_csv(environment, "environment.csv", na = "")
+```
+
+Each row in `environment.csv` is one point on the 80 m grid. It brings together temperature, rainfall, wind speed, elevation, slope, land cover and fire and forest management records. We can use these columns later to find places with similar conditions near and far from roads. Nearby points often share the same climate cell.
+
+## Data sources
+
+- **Land cover and the pilot road.** Direção-Geral do Território (DGT), COS Series 2, [2018](https://ogcapi.dgterritorio.gov.pt/collections/cos2018v4) and [2025](https://ogcapi.dgterritorio.gov.pt/collections/cos2025v1). The forest maps use eucalyptus class 5.1.1.6. [DGT, CC BY 4.0](https://www.dgterritorio.gov.pt/dados-abertos)
+- **Pilot aerial photos.** DGT imagery from 2018 and 2025, exported at 2 m for area B. [DGT orthophotos, CC BY 4.0](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-topografica/ortofotos/ortofotos-digitais)
+- **Pilot climate.** WorldClim v2.1, temperature and rainfall averages for 1970–2000. [WorldClim](https://www.worldclim.org/data/worldclim21.html) · [Fick and Hijmans (2017)](https://doi.org/10.1002/joc.5086)
+- **Regional climate.** CHELSA v2.1, temperature, rainfall and mean near-surface wind speed for 1981–2010. [CHELSA](https://www.chelsa-climate.org/datasets/chelsa_bioclim) · [BIOCLIM+ data, CC0](https://doi.org/10.16904/envidat.332)
+- **Elevation and slope.** Copernicus DEM GLO-30, tile N40/W009. [Product and licence](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM)
+- **Fire.** ICNF, *Áreas ardidas*, 2017–2025, retrieved 5 November 2026. [Fire perimeters](https://sigservices.icnf.pt/server/rest/services/BDG/areas_ardidas/FeatureServer) · [ICNF terms](https://geocatalogo.icnf.pt/dados/condicoes_utilizacao.pdf). The 2017 burn severity and image quality layers come from Jahanianfard et al. [Portuguese Burn Severity Atlas v2, CC BY 4.0](https://doi.org/10.5281/zenodo.15188051)
+- **Forest management.** Lesiv et al., global forest management map for 2015, v3.2. [Data, CC BY 4.0](https://doi.org/10.5281/zenodo.5115984)
+
+Run `quarto render analysis.qmd` to rebuild the figures and CSV. The first run downloads the WorldClim file for the pilot maps if needed.
+
+Produced using Copernicus WorldDEM-30 © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018 provided under COPERNICUS by the European Union and ESA; all rights reserved. The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30.
