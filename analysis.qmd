@@ -1,5 +1,5 @@
 ---
-title: "BIOL6130 Final Project: data preparation"
+title: "BIOL6130 Final Project: eucalyptus near roads"
 format:
   pdf:
     pdf-engine: pdflatex
@@ -15,15 +15,15 @@ format:
     fig-dpi: 200
     fig-pos: H
 execute:
-  echo: true
+  echo: false
   message: false
 ---
 
+<!-- Run quarto render analysis.qmd to rebuild the PDF and environment.csv. The first run downloads the pilot climate file if needed. -->
+
 ## Pilot study in area B
 
-The initial study used a 4 km by 4 km window to inspect the land-cover data and one main road. The regional maps and environmental table follow this pilot.
-
-### Read the data
+We first looked at a 4 km by 4 km area near Coimbra, Portugal. The yellow line on the first map shows the main road we selected.
 
 ```{r}
 #| message: false
@@ -41,7 +41,7 @@ forest_2025 <- read_sf("Raw Data/cos2025_eucalyptus.geojson")
 road <- read_sf("Raw Data/cos2018_roads.geojson") %>%
   filter(ogc_fid == 147070)
 
-# Crop climate data to the current B window.
+# Crop the climate data to the pilot area.
 area <- as.polygons(ext(photo_2018), crs = crs(photo_2018))
 window <- project(area, "EPSG:4326")
 climate_file <- "Raw Data/PRT_wc2.1_30s_bio.tif"
@@ -56,21 +56,16 @@ climate <- rast(climate_file)[[c(1, 12)]] %>%
 names(climate) <- c("temperature", "precipitation")
 ```
 
-### Inspect the contents
+Four fields from the 2018 land-cover map are shown below.
 
 ```{r}
-glimpse(land_cover, width = 75)
+land_cover %>%
+  st_drop_geometry() %>%
+  select(id = ogc_fid, cover_code = cos18v4_n4_c, cover_name = cos18v4_n4_l, area_ha) %>%
+  glimpse(width = 68)
 ```
 
-### Draw the pilot maps
-
-The pilot focused on the main road recorded as COS ID 147070. The yellow overlay marks this road within area B.
-
-The climate maps show 1970--2000 averages at 30-arc-second resolution
-(about 710 by 925 m here). The 2025 aerial image provides geographic context.
-
 ```{r}
-# tidyterra draws the photograph; ggplot2 adds the data layer and map layout.
 draw_map <- function(photo, layer, title) {
   ggplot() +
     geom_spatraster_rgb(data = photo, interpolate = FALSE,
@@ -79,13 +74,14 @@ draw_map <- function(photo, layer, title) {
     coord_sf(crs = 3763, datum = st_crs(3763), expand = FALSE,
              xlim = c(xmin(photo), xmax(photo)),
              ylim = c(ymin(photo), ymax(photo))) +
-    labs(title = title, x = "Easting (m)", y = "Northing (m)",
-         caption = "Aerial imagery: DGT (CC BY 4.0) | EPSG:3763") +
+    labs(title = title, x = "Easting (m)", y = "Northing (m)") +
     theme_minimal()
 }
 ```
 
 ```{r}
+#| out-width: 5.2in
+#| fig-align: center
 draw_map(photo_2018,
          geom_sf(data = road, fill = "#FFD166", colour = NA),
          "Selected main road, 2018")
@@ -115,6 +111,8 @@ draw_map(photo_2025,
          "Mean temperature, 1970-2000 (30 arcsec)") +
   scale_fill_viridis_c(name = "degrees C")
 ```
+
+The climate maps show average temperature and annual rainfall for 1970–2000 over the 2025 aerial photo. Each climate cell covers about 710 by 925 m here.
 
 ```{r}
 draw_map(photo_2025,
@@ -158,7 +156,7 @@ forest_area_ha <- c("2018" = areas_ha(forest18), "2025" = areas_ha(forest25),
                     setNames(areas_ha(changes), c("Retained", "Gain", "Loss")))
 hectares <- function(x) paste0(format(round(x), big.mark = ",", trim = TRUE), " ha")
 
-map_forest <- function(features, colours, heading, detail, source) {
+map_forest <- function(features, colours, heading, detail) {
   ggplot() +
     geom_sf(data = study_area, aes(fill = "Other cover"), colour = NA) +
     geom_sf(data = features, aes(fill = cover), colour = NA) +
@@ -166,8 +164,7 @@ map_forest <- function(features, colours, heading, detail, source) {
     scale_fill_manual(NULL, values = colours, breaks = names(colours)) +
     coord_sf(datum = st_crs(4326), expand = FALSE) +
     labs(title = heading, subtitle = detail, x = NULL, y = NULL,
-         caption = paste0("Central Portugal  |  North up  |  Map width approximately 34 km\n",
-                          "Land cover: DGT, ", source, " (CC BY 4.0).")) +
+         caption = "Central Portugal  |  North up  |  Map width about 34 km") +
     theme_minimal(base_size = 11) +
     theme(panel.grid = element_blank(), legend.position = "bottom",
           legend.key = element_rect(colour = "grey78", fill = NA, linewidth = 0.2),
@@ -176,22 +173,21 @@ map_forest <- function(features, colours, heading, detail, source) {
 }
 
 annual_colours <- c("Eucalyptus forest" = "#286850", "Other cover" = "#F7F6F1")
-annual_map <- function(forest, year, source) {
+annual_map <- function(forest, year) {
   features <- st_sf(cover = "Eucalyptus forest", geometry = forest)
   map_forest(features, annual_colours, paste("Eucalyptus forest in", year),
-             paste("Mapped forest area:", hectares(forest_area_ha[year])), source)
+             paste("Mapped forest area:", hectares(forest_area_ha[year])))
 }
 change_detail <- paste("Gained", hectares(forest_area_ha["Gain"]), " |  Lost",
                        hectares(forest_area_ha["Loss"]), " |  Retained",
                        hectares(forest_area_ha["Retained"]))
 maps <- list(
-  "2018" = annual_map(forest18, "2018", "COS2018v4"),
-  "2025" = annual_map(forest25, "2025", "COS2025v1"),
+  "2018" = annual_map(forest18, "2018"),
+  "2025" = annual_map(forest25, "2025"),
   "change" = map_forest(changes,
     c("Gained" = "#006792", "Lost" = "#BF430D", "Retained" = "#CED9CC",
       "Other cover" = "#F7F6F1"),
-    "Eucalyptus forest change, 2018 to 2025", change_detail,
-    "COS2018v4 and COS2025v1")
+    "Eucalyptus forest change, 2018 to 2025", change_detail)
 )
 ```
 
@@ -204,7 +200,7 @@ maps <- list(
 maps[["2018"]]
 ```
 
-The map covers the full study window near Coimbra, central Portugal (8.50–8.10°W and 40.025–40.325°N). Green shows every polygon classified as eucalyptus-dominated forest in the 2018 Portuguese land-cover map.
+Green shows forest mapped as mainly eucalyptus in 2018. The study area is near Coimbra in central Portugal (8.50–8.10°W, 40.025–40.325°N).
 
 \newpage
 
@@ -217,7 +213,7 @@ The map covers the full study window near Coimbra, central Portugal (8.50–8.10
 maps[["2025"]]
 ```
 
-The 2025 map uses the same boundary, scale and eucalyptus class as the 2018 map. Each annual area is measured from the original land-cover polygons clipped to that boundary.
+The 2025 map shows eucalyptus forest in the same area and at the same scale.
 
 \newpage
 
@@ -230,9 +226,7 @@ The 2025 map uses the same boundary, scale and eucalyptus class as the 2018 map.
 maps[["change"]]
 ```
 
-Blue marks land mapped as eucalyptus only in 2025. Orange marks land mapped as eucalyptus only in 2018. Pale green marks areas mapped as eucalyptus in both years. The net gain was **`r sprintf("%.1f", forest_area_ha["Gain"] - forest_area_ha["Loss"])` ha**. The map records a change in the dominant cover class. Individual seedlings, planting dates and routes of seed arrival cannot be identified from these polygons.
-
-\newpage
+Blue shows eucalyptus forest gained between 2018 and 2025. Orange shows forest lost, and pale green shows forest mapped in both years. The net gain was **`r sprintf("%.1f", forest_area_ha["Gain"] - forest_area_ha["Loss"])` ha**. These maps show the main land cover in each area.
 
 ## Environment table
 
@@ -305,18 +299,293 @@ environment <- sites %>% st_drop_geometry() %>%
 readr::write_csv(environment, "environment.csv", na = "")
 ```
 
-Each row in `environment.csv` is one point on the 80 m grid. It brings together temperature, rainfall, wind speed, elevation, slope, land cover and fire and forest management records. We can use these columns later to find places with similar conditions near and far from roads. Nearby points often share the same climate cell.
+Each row in `environment.csv` is one point on the 80 m grid. We used its climate, elevation, slope, land cover, fire and forest management data to find similar sites near and far from roads. Nearby points can share a climate cell.
+
+\newpage
+
+## Result 1
+
+```{r}
+#| label: choose-2018-stands
+#| include: false
+source_stands <- read_sf(input("land_cover.gpkg"), "euc2018")
+regular_roads <- read_sf(input("roads.gpkg"), "roads2018") %>% filter(group != "track")
+eligible_cover <- function(code) substr(code, 1, 1) %in% as.character(2:6) & code != "5.1.1.6"
+whole <- lengths(st_geometry(source_stands)) == 1 & lengths(st_within(source_stands, study_area)) == 1
+
+# Find nearby old stands first, then use exact point-to-polygon distances.
+sites_2018 <- environment %>%
+  filter(eligible_cover(cos_2018_code), is.finite(planted_forest_2015_m),
+         !burned_perimeter_2017 | (is.finite(dnbr_2017) & image_suitability_2017_pct > 0)) %>%
+  st_as_sf(coords = c("x_m", "y_m"), crs = 3763, remove = FALSE)
+stand_geom <- st_geometry(source_stands)
+site_geom <- st_geometry(sites_2018)
+nearby <- st_intersects(st_buffer(stand_geom, 51), site_geom)
+distances <- bind_rows(lapply(which(lengths(nearby) > 0), function(j) {
+  i <- nearby[[j]]
+  distance_m <- as.numeric(st_distance(site_geom[i], stand_geom[j]))
+  tibble(i = i, j = j, forest_m = distance_m)
+}))
+nearest <- distances %>% group_by(i) %>% slice_min(forest_m, with_ties = FALSE) %>%
+  ungroup() %>% filter(forest_m > 0, forest_m <= 50, whole[j])
+pool <- sites_2018[nearest$i, ] %>%
+  mutate(source_id = source_stands$source_id[nearest$j], forest_m = nearest$forest_m,
+         planted = planted_forest_2015_m < 1e-6, site_row = row_number())
+road_geom <- st_geometry(regular_roads)
+road_index <- st_nearest_feature(pool, regular_roads)
+pool$road_m <- as.numeric(st_length(st_nearest_points(st_geometry(pool), road_geom[road_index],
+                                                      pairwise = TRUE)))
+pool <- st_drop_geometry(pool)
+keys <- c("source_id", "cos_2018_code", "burned_perimeter_2017", "planted")
+near_sites <- pool %>% filter(road_m <= 100) %>% select(all_of(keys), a = site_row)
+far_sites <- pool %>% filter(road_m > 500) %>% select(all_of(keys), b = site_row)
+candidates <- sort(intersect(near_sites$source_id, far_sites$source_id))
+links <- merge(near_sites, far_sites, by = keys)
+within_limit <- function(x, limit) abs(x[links$a] - x[links$b]) <= limit
+dx <- pool$x_m[links$a] - pool$x_m[links$b]
+dy <- pool$y_m[links$a] - pool$y_m[links$b]
+matched <- links %>%
+  filter(dx^2 + dy^2 <= 1000^2, within_limit(pool$forest_m, 20),
+         within_limit(pool$elevation_m, 30), within_limit(pool$slope_deg, 5),
+         within_limit(pool$temp_mean_c, 0.5), within_limit(pool$precip_annual_mm, 50),
+         within_limit(pool$wind_speed_ms, 0.5), within_limit(pool$planted_forest_2015_m, 100),
+         !burned_perimeter_2017 | within_limit(pool$dnbr_2017, 0.1))
+focus_stands <- source_stands %>% filter(source_id %in% matched$source_id) %>%
+  arrange(source_id) %>% mutate(number = match(source_id, candidates))
+```
+
+```{r}
+#| label: compare-outside-belts
+#| include: false
+road_buffer <- function(m) st_union(st_buffer(road_geom, m))
+road100 <- road_buffer(100)
+road500 <- road_buffer(500)
+eligible_land <- land18 %>% filter(eligible_cover(cover_code)) %>% st_geometry()
+empty_polygon <- st_sfc(st_polygon(), crs = 3763)
+polygon_union <- function(g) {
+  g <- g[!st_is_empty(g) & st_dimension(g, NA_if_empty = FALSE) == 2]
+  if (!length(g)) return(empty_polygon)
+  st_union(suppressWarnings(st_collection_extract(g, "POLYGON")))
+}
+clip_area <- function(x, y) {
+  hits <- st_intersects(x, y)[[1]]
+  if (!length(hits)) return(empty_polygon)
+  polygon_union(suppressWarnings(st_intersection(x, y[hits])))
+}
+subtract_area <- function(x, y) polygon_union(st_difference(x, y))
+sides <- c("near", "middle", "far")
+belt_for_stand <- function(k) {
+  # Use only the exterior ring, so that interior clearings do not enter the belt.
+  outer <- st_sfc(st_polygon(list(st_geometry(focus_stands)[[k]][[1]][[1]])), crs = 3763)
+  belt <- subtract_area(clip_area(st_buffer(outer, 50), study_area), outer)
+  land <- clip_area(belt, eligible_land)
+  within500 <- clip_area(land, road500)
+  near <- clip_area(within500, road100)
+  zones <- c(near, subtract_area(within500, near), subtract_area(land, within500))
+  st_sf(source_id = focus_stands$source_id[k], road = sides,
+        geometry = st_cast(zones, "MULTIPOLYGON", warn = FALSE))
+}
+belt_zones <- do.call(rbind, lapply(seq_len(nrow(focus_stands)), belt_for_stand))
+zone_geom <- st_geometry(belt_zones)
+gains <- lapply(seq_along(zone_geom), function(i) {
+  g <- clip_area(zone_geom[i], forest25)
+  if (as.numeric(st_area(g)) < 1e-4) g <- empty_polygon
+  st_cast(g, "MULTIPOLYGON", warn = FALSE)
+})
+belt_gains <- st_set_geometry(belt_zones, do.call(c, gains))
+stand_areas <- st_drop_geometry(belt_zones) %>%
+  mutate(eligible_ha = areas_ha(belt_zones), gain_ha = areas_ha(belt_gains),
+         pct = 100 * gain_ha / eligible_ha)
+belt_rates <- stand_areas %>% group_by(source_id) %>%
+  summarise(near_pct = pct[road == "near"], far_pct = pct[road == "far"],
+            difference_pp = near_pct - far_pct, .groups = "drop")
+
+# Dissolve shared belts before counting areas or counting distinct changed patches.
+zone_union <- belt_zones %>% group_by(road) %>% summarise(.groups = "drop")
+gain_union <- belt_gains %>% group_by(road) %>% summarise(.groups = "drop")
+side_areas <- tibble(road = sides,
+  eligible_ha = areas_ha(zone_union)[match(sides, zone_union$road)],
+  gain_ha = areas_ha(gain_union)[match(sides, gain_union$road)]) %>%
+  mutate(gain_share_pct = 100 * gain_ha / sum(gain_ha), gain_pct = 100 * gain_ha / eligible_ha)
+parts <- changes %>% filter(cover == "Gained") %>% st_geometry() %>%
+  st_collection_extract("POLYGON", warn = FALSE) %>% st_cast("POLYGON", warn = FALSE)
+patches <- st_sf(patch = seq_along(parts), geometry = parts)
+overlap <- suppressWarnings(st_intersection(patches, zone_union)) %>%
+  mutate(m2 = as.numeric(st_area(.))) %>% st_drop_geometry()
+by_patch <- overlap %>% group_by(patch) %>%
+  summarise(total_m2 = sum(m2), near = any(road == "near" & m2 > 1),
+            middle = any(road == "middle" & m2 > 1), far = any(road == "far" & m2 > 1),
+            .groups = "drop") %>% filter(total_m2 > 1)
+patch_counts <- by_patch %>%
+  summarise(total = n(), near_only = sum(near & !middle & !far),
+            near_middle = sum(near & middle), outside_near = sum(!near), near = sum(near))
+```
+
+```{r}
+#| label: compare-environments
+#| include: false
+# Assign each 20 m cell its nearest original environmental value.
+# The smaller cells allow area weighting where forest boundaries cross a grid cell.
+grid20 <- rast(xmin = 20 * floor(bounds["xmin"] / 20), xmax = 20 * ceiling(bounds["xmax"] / 20),
+               ymin = 20 * floor(bounds["ymin"] / 20), ymax = 20 * ceiling(bounds["ymax"] / 20),
+               resolution = 20, crs = "EPSG:3763")
+align20 <- function(layer) terra::project(layer, grid20, method = "near")
+env_grid <- c(align20(c(dsm, slope)), align20(rast(input("climate.tif"))), align20(management),
+              rasterize(vect(filter(fires, year == 2017)), grid20, field = 1, background = 0),
+              align20(rast(input("fire_dnbr_2017.tif"))),
+              align20(rast(input("fire_confidence_2017.tif"))))
+names(env_grid) <- c("elevation", "slope", "temperature", "rain", "wind", "management",
+                     "burned", "severity", "quality")
+env_grid <- writeRaster(env_grid, tempfile(fileext = ".tif"), datatype = "FLT4S")
+
+# Give eligible land and mapped gain the same cover classes and forest-edge bands.
+original_cover <- land18 %>% filter(eligible_cover(cover_code)) %>% select(cover_code)
+edge25 <- source_stands %>% filter(source_id %in% focus_stands$source_id) %>%
+  select(source_id) %>% st_buffer(25, nQuadSegs = 48)
+split_edge_band <- function(one_stand) {
+  inside25 <- st_geometry(edge25[edge25$source_id == one_stand$source_id[1], ])
+  bind_rows(st_intersection(one_stand, inside25) %>% mutate(edge_band = "0-25"),
+            st_difference(one_stand, inside25) %>% mutate(edge_band = "25-50"))
+}
+belt_parts <- bind_rows(eligible = select(belt_zones, source_id, road),
+                        gain = select(belt_gains, source_id, road), .id = "measure") %>%
+  filter(road %in% c("near", "far"), !st_is_empty(.)) %>%
+  st_cast("MULTIPOLYGON", warn = FALSE) %>% st_cast("POLYGON", warn = FALSE) %>%
+  st_intersection(original_cover) %>% st_collection_extract("POLYGON") %>%
+  filter(as.numeric(st_area(.)) > 1e-6)
+belt_parts <- bind_rows(lapply(split(belt_parts, belt_parts$source_id), split_edge_band)) %>%
+  st_collection_extract("POLYGON") %>% filter(as.numeric(st_area(.)) > 1e-6)
+
+# Weight each polygon by the fraction of each 0.04 ha grid cell that it covers.
+cell_areas <- function(rows) {
+  pieces <- belt_parts[rows, ]
+  hit <- terra::extract(env_grid[[1]], vect(pieces), exact = TRUE, cells = TRUE)
+  st_drop_geometry(pieces)[hit$ID, ] %>% mutate(cell = hit$cell, ha = 0.04 * hit$fraction)
+}
+rows <- seq_len(nrow(belt_parts))
+area_rows <- bind_rows(lapply(split(rows, (rows - 1L) %/% 120L), cell_areas))
+cell_ids <- unique(area_rows$cell)
+classes <- terra::extract(env_grid, cell_ids) %>%
+  mutate(cell = cell_ids) %>%
+  filter(!is.na(management), burned == 0 | quality > 0) %>%
+  transmute(cell, planted_class = management %in% c(31, 32), burned,
+            severity_band = if_else(burned == 0, 0, floor(severity / 0.10)),
+            temp_band = floor(temperature / 0.5), rain_band = floor(rain / 50),
+            wind_band = floor(wind / 0.5), elev_band = floor(elevation / 30),
+            slope_band = floor(slope / 5)) %>% filter(complete.cases(.))
+by_side <- inner_join(area_rows, classes, by = "cell") %>%
+  group_by(source_id, cover_code, edge_band, planted_class, burned, severity_band,
+           temp_band, rain_band, wind_band, elev_band, slope_band, road) %>%
+  summarise(eligible_ha = sum(ha[measure == "eligible"]), gain_ha = sum(ha[measure == "gain"]),
+            .groups = "drop") %>% filter(eligible_ha > 1e-6)
+
+# Compare only classes present on both sides of the same forest.
+shared <- inner_join(filter(by_side, road == "near") %>% select(-road),
+                     filter(by_side, road == "far") %>% select(-road),
+                     by = c("source_id", "cover_code", "edge_band", "planted_class", "burned",
+                            "severity_band", "temp_band", "rain_band", "wind_band", "elev_band",
+                            "slope_band"), suffix = c("_near", "_far")) %>%
+  mutate(weight = pmin(eligible_ha_near, eligible_ha_far))
+env_stands <- shared %>% group_by(source_id) %>%
+  summarise(overlap_ha = sum(weight),
+            near_pct = 100 * weighted.mean(gain_ha_near / eligible_ha_near, weight),
+            far_pct = 100 * weighted.mean(gain_ha_far / eligible_ha_far, weight), .groups = "drop")
+env_result <- env_stands %>% summarise(stands = n(), overlap_ha = sum(overlap_ha),
+  near_pct = mean(near_pct), far_pct = mean(far_pct), difference_pp = near_pct - far_pct)
+```
+
+On the 80 m grid, `r length(candidates)` eucalyptus stands had sites both near a road (up to 100 m) and far from a road (over 500 m). We kept the `r nrow(focus_stands)` stands where the near and far sites had similar conditions. We looked at a strip of land up to 50 m outside each stand’s 2018 edge and left out clearings inside the stand. Purple shows where the map changed from another land cover in 2018 to eucalyptus in 2025.
+
+```{r}
+#| label: perimeter-map
+#| echo: false
+#| fig-width: 6.5
+#| fig-height: 3.85
+#| fig-align: center
+#| fig-alt: "Stand 35 and its enlarged southern edge. Magenta shows mapped eucalypt gains inside the 50 m belt outside the 2018 stand."
+
+stand35 <- focus_stands %>% filter(source_id == 738157)
+zones35 <- belt_zones %>% filter(source_id == 738157)
+gains35 <- belt_gains %>% filter(source_id == 738157)
+belt_colour <- c(near = "#F3BA73", middle = "#D4D1C8", far = "#83B7D6")
+forest_colour <- "#A5C5B4"
+gain_colour <- "#A12669"
+road_colour <- "#667674"
+
+# Coordinates in Portugal's national grid (EPSG:3763), in metres.
+overview <- c(-11208, 54174, -4461, 61105)
+detail <- c(-8480, 55447.58, -7400, 56362.42)
+draw_edge <- function(bounds, roads, scale_m, heading) {
+  x <- bounds[c(1, 3)]
+  y <- bounds[c(2, 4)]
+  par(mar = c(0.15, 0.15, 1.3, 0.15))
+  plot.new()
+  plot.window(x, y, asp = 1, xaxs = "i", yaxs = "i")
+  rect(x[1], y[1], x[2], y[2], col = "#F9F7F1", border = NA)
+  clip(x[1], x[2], y[1], y[2])
+  plot(st_geometry(stand35), add = TRUE, col = forest_colour, border = "#658478", lwd = 0.35)
+  plot(st_geometry(zones35), add = TRUE, col = belt_colour[as.character(zones35$road)], border = NA)
+  plot(st_geometry(gains35), add = TRUE, col = gain_colour, border = NA)
+  box <- st_bbox(c(xmin = x[1], ymin = y[1], xmax = x[2], ymax = y[2]), crs = st_crs(stand35))
+  roads <- roads[st_as_sfc(box), ]
+  plot(st_geometry(roads), add = TRUE, col = road_colour, lwd = 0.55)
+  rect(x[1], y[1], x[2], y[2], border = "#A8B5AF", lwd = 0.6)
+  mtext(heading, side = 3, adj = 0, line = 0.25, cex = 0.88, font = 2)
+  nx <- x[2] - 0.045 * diff(x)
+  text(nx, y[2] - 0.04 * diff(y), "N", font = 2, cex = 0.68)
+  arrows(nx, y[2] - 0.12 * diff(y), nx, y[2] - 0.065 * diff(y), length = 0.04)
+  sx <- x[1] + 0.045 * diff(x)
+  sy <- y[1] + 0.06 * diff(y)
+  rect(sx - 0.015 * diff(x), sy - 0.018 * diff(y),
+       sx + scale_m + 0.015 * diff(x), sy + 0.065 * diff(y), col = "#F9F7F1", border = NA)
+  segments(sx, sy, sx + scale_m, sy, lwd = 1.5)
+  text(sx + scale_m / 2, sy + 0.033 * diff(y), paste(scale_m, "m"), cex = 0.68)
+}
+
+layout(matrix(c(1, 2, 3, 3), nrow = 2, byrow = TRUE),
+       widths = c(550, 667), heights = c(1, 0.17))
+draw_edge(overview, filter(regular_roads, group == "major"), 1000, "Stand 35 (major roads)")
+rect(detail[1], detail[2], detail[3], detail[4], border = "#272F37", lwd = 1.25)
+draw_edge(detail, regular_roads, 200, "Boxed area (major and local roads)")
+
+par(mar = c(0, 0, 0, 0))
+plot.new()
+legend("center", ncol = 3, bty = "n", cex = 0.79, x.intersp = 0.45, y.intersp = 1.15,
+       legend = c("2018 eucalypt stand", "Mapped gain by 2025", "Near road (0-100 m)",
+                  "Middle (>100 to 500 m)", "Far from road (>500 m)", "2018 road"),
+       col = c(forest_colour, gain_colour, belt_colour[c("near", "middle", "far")], road_colour),
+       pch = c(rep(15, 5), NA), lty = c(rep(0, 5), 1), lwd = 1.3, pt.cex = 1.4)
+```
+
+*Around stand 35, the map showed new eucalyptus cover on `r sprintf("%.2f", belt_rates$near_pct[belt_rates$source_id == 738157])`% of the land we compared near roads and `r sprintf("%.2f", belt_rates$far_pct[belt_rates$source_id == 738157])`% far from roads.*
+
+Across all `r nrow(focus_stands)` stands, we found **`r sprintf("%.2f", sum(side_areas$gain_ha))` ha** of new eucalyptus cover in the strips. Within these strips, **`r patch_counts$near` of the `r patch_counts$total` new patches** reached land within 100 m of a road. The other `r patch_counts$outside_near` stayed farther away. We counted land shared by two stands once.
+
+```{r}
+#| label: final-road-distance-table
+#| echo: false
+distance_labels <- c(near = "Up to 100 m", middle = "Over 100 to 500 m", far = "Over 500 m")
+side_areas %>%
+  transmute("Road distance" = unname(distance_labels[road]),
+            "Land compared (ha)" = sprintf("%.2f", eligible_ha), "Gain (ha)" = sprintf("%.2f", gain_ha),
+            "Share of total gain" = sprintf("%.1f%%", gain_share_pct),
+            "Land with gain" = sprintf("%.2f%%", gain_pct)) %>%
+  knitr::kable(format = "pipe", align = c("l", "r", "r", "r", "r"))
+```
+
+In `r env_result$stands` stands we could compare near and far land with similar cover, fire history, plantation status, terrain, climate and distance from the forest edge. Within each group of similar land, we gave both sides the weight of the smaller area. This gave `r sprintf("%.2f", env_result$overlap_ha)` ha per side in total. We then gave each stand equal weight. New eucalyptus cover averaged **`r sprintf("%.2f", env_result$near_pct)`% near roads** and **`r sprintf("%.2f", env_result$far_pct)`% far from roads**. Only `r sum(env_stands$near_pct > 0 | env_stands$far_pct > 0)` stands showed any gain on this land. This gives little support for the idea that roads help eucalyptus spread. The maps cannot tell us whether the trees were planted or grew naturally.
+
+\newpage
 
 ## Data sources
 
-- **Land cover and the pilot road.** Direção-Geral do Território (DGT), COS Series 2, [2018](https://ogcapi.dgterritorio.gov.pt/collections/cos2018v4) and [2025](https://ogcapi.dgterritorio.gov.pt/collections/cos2025v1). The forest maps use eucalyptus class 5.1.1.6. [DGT, CC BY 4.0](https://www.dgterritorio.gov.pt/dados-abertos)
+- **Land cover and the pilot road.** Direção-Geral do Território (DGT), COS Series 2, [2018 v4](https://ogcapi.dgterritorio.gov.pt/collections/cos2018v4) and [2025 v1](https://ogcapi.dgterritorio.gov.pt/collections/cos2025v1). The forest maps use eucalyptus class 5.1.1.6. [DGT, CC BY 4.0](https://www.dgterritorio.gov.pt/dados-abertos)
+- **Regional roads.** We used the 1 January 2018 road network in `roads.gpkg` and excluded tracks. © OpenStreetMap contributors. [Geofabrik Portugal archive](https://download.geofabrik.de/europe/portugal.html) · [ODbL 1.0](https://www.openstreetmap.org/copyright)
 - **Pilot aerial photos.** DGT imagery from 2018 and 2025, exported at 2 m for area B. [DGT orthophotos, CC BY 4.0](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-topografica/ortofotos/ortofotos-digitais)
 - **Pilot climate.** WorldClim v2.1, temperature and rainfall averages for 1970–2000. [WorldClim](https://www.worldclim.org/data/worldclim21.html) · [Fick and Hijmans (2017)](https://doi.org/10.1002/joc.5086)
 - **Regional climate.** CHELSA v2.1, temperature, rainfall and mean near-surface wind speed for 1981–2010. [CHELSA](https://www.chelsa-climate.org/datasets/chelsa_bioclim) · [BIOCLIM+ data, CC0](https://doi.org/10.16904/envidat.332)
 - **Elevation and slope.** Copernicus DEM GLO-30, tile N40/W009. [Product and licence](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM)
 - **Fire.** ICNF, *Áreas ardidas*, 2017–2025, retrieved 5 November 2026. [Fire perimeters](https://sigservices.icnf.pt/server/rest/services/BDG/areas_ardidas/FeatureServer) · [ICNF terms](https://geocatalogo.icnf.pt/dados/condicoes_utilizacao.pdf). The 2017 burn severity and image quality layers come from Jahanianfard et al. [Portuguese Burn Severity Atlas v2, CC BY 4.0](https://doi.org/10.5281/zenodo.15188051)
 - **Forest management.** Lesiv et al., global forest management map for 2015, v3.2. [Data, CC BY 4.0](https://doi.org/10.5281/zenodo.5115984)
-
-Run `quarto render analysis.qmd` to rebuild the figures and CSV. The first run downloads the WorldClim file for the pilot maps if needed.
 
 Produced using Copernicus WorldDEM-30 © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018 provided under COPERNICUS by the European Union and ESA; all rights reserved. The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30.
