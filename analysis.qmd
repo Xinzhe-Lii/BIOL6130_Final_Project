@@ -1,5 +1,5 @@
 ---
-title: "BIOL6130 Final Project: eucalyptus near roads"
+title: "Roads and eucalyptus forest expansion, 2018–2025"
 format:
   pdf:
     pdf-engine: pdflatex
@@ -22,9 +22,13 @@ execute:
 
 <!-- Rebuild with: quarto render analysis.qmd
 Requires R, Quarto and a LaTeX installation (e.g. TinyTeX).
-R packages: sf, terra, dplyr, ggplot2, tidyterra, fixest, tidyr, readr, jsonlite, digest, knitr.
+R packages: sf, terra, dplyr, ggplot2, tidyterra, fixest, tidyr, readr, jsonlite, digest, knitr, png.
 The first run downloads the pilot WorldClim file if needed and computes the full analysis.
 Derived files are saved in the ignored _cache folder. -->
+
+## Aim and predictions
+
+We ask whether the road network is associated with eucalyptus forest expansion in central Portugal. We predict (1) more new eucalyptus cover near roads and (2) a slower decline in new cover with distance from old eucalyptus near roads. The current results combine all included road types into one distance measure. The first maps document the pilot and regional preparation; the poster figures and model results follow.
 
 ## Pilot study in area B
 
@@ -32,6 +36,8 @@ We first looked at a 4 km by 4 km area near Coimbra, Portugal. The yellow line o
 
 ```{r}
 #| message: false
+set.seed(6130)
+options(timeout = 600)
 library(sf)
 library(terra)
 library(dplyr)
@@ -323,9 +329,9 @@ Private and agricultural access restrictions do not remove a physical route, so 
 
 **A service road is not necessarily a forest road.** Of the 1,182 service segments without a subtype, 48% of their length inside the study area crosses artificial surfaces in the 2018 map, and about 26% crosses forests. We therefore call the second group land-access routes. We check results with only tracks, without unknown service subtypes, and without the 29 segments explicitly tagged as closed to motor vehicles.
 
-The two road distances enter the model together. Each contrast changes one road distance while keeping the other observed. The archive can miss routes, and it does not measure traffic or the exact construction date.
+For the poster analysis, distance means the nearest included route across both groups: the smaller of traffic-road and land-access distance. All distances enter one continuous model. The archive can miss routes and does not measure traffic or the exact construction date.
 
-**Our original predictions.** Result 1 asks whether comparable land gains more eucalyptus near roads. Result 2 asks whether gain declines less with distance from old eucalyptus near roads. Both test the broader hypothesis that roads favour forest expansion. Result 3 is an added exploration of pine-to-eucalyptus change in fire footprints.
+**Our original predictions.** Result 1 asks whether comparable land gains more eucalyptus near roads. Result 2 asks whether gain declines less with distance from old eucalyptus near roads. Both test the broader hypothesis that roads favour forest expansion. The burned-site maps provide an additional exploration of possible explanations.
 
 ```{r}
 #| label: selected-cache-setup
@@ -336,7 +342,8 @@ library(readr)
 library(jsonlite)
 setFixest_nthreads(2)
 # Raw-file fingerprints keep the working cache tied to these exact inputs.
-cache_key <- digest::digest(list(version = "selected-roads-v1", files = tools::md5sum(list.files("Raw Data", full.names = TRUE))))
+cache_inputs <- c("land_cover.gpkg", "roads2018_selected.gpkg", "climate.tif", "copernicus_glo30.tif", "forest_management_2015.tif", "fires.gpkg", "fire_dnbr_2017.tif", "fire_confidence_2017.tif")
+cache_key <- digest::digest(list(version = "selected-roads-v1", files = tools::md5sum(input(cache_inputs))))
 analysis_cache <- file.path("_cache", cache_key)
 dir.create(analysis_cache, recursive = TRUE, showWarnings = FALSE)
 env_file <- file.path(analysis_cache, "env.tif")
@@ -610,643 +617,506 @@ if (!file.exists(file.path(analysis_cache, "data", "analysis_data.rds"))) {
 }
 ```
 
-```{r}
-#| label: selected-road-models
-#| include: false
-if (!file.exists(file.path(analysis_cache,"model/fit_status.json"))) {
-suppressPackageStartupMessages({library(dplyr); library(readr); library(jsonlite)})
-
-library(fixest)
-setFixest_nthreads(2)
-out <- file.path(analysis_cache,"model")
-dir.create(out,recursive=TRUE,showWarnings=FALSE)
-data_file <- file.path(analysis_cache,"data/analysis_data.rds")
-data <- readRDS(data_file)
-weighted_quantile <- function(x, w, p) {
-  k <- order(x)
-  x[k][vapply(p, function(q) which(cumsum(w[k]) / sum(w) >= q)[1], integer(1))]
-}
-base <- data %>% mutate(
-  area_ha = eligible_m2 / 10000, gain_fraction = gain_m2 / eligible_m2,
-  stratum = paste(source_id, cover_code, sep = "_"),
-  management_class = factor(case_when(is.na(management) ~ "Unknown",
-    management %in% c(31, 32) ~ "Planted", TRUE ~ "Other")),
-  burned = as.integer(burned > 0),
-  severity_missing = as.integer(burned == 1 & (!is.finite(severity) | !is.finite(quality) | quality <= 0)),
-  severity_value = if_else(burned == 1 & severity_missing == 0, severity, 0),
-  elev100 = elevation / 100, slope10 = slope / 10, rain100 = rain / 100,
-  block1 = paste(floor(x_m / 1000), floor(y_m / 1000)),
-  block2 = paste(floor(x_m / 2000), floor(y_m / 2000)),
-  block4 = paste(floor(x_m / 4000), floor(y_m / 4000)))
-required <- c("elev100", "slope10", "temperature", "rain100", "wind", "burned", "source_m", "traffic_m", "access_m")
-base$complete_environment <- apply(is.finite(as.matrix(base[required])), 1, all)
-reference <- base %>% filter(source_m <= 100, area_ha > 0)
-road_values <- bind_rows(lapply(c("traffic", "access"), function(g) {
-  q <- weighted_quantile(reference[[paste0(g,"_m")]], reference$area_ha, c(.25,.5,.75))
-  tibble(road=g, nearer_m=q[1], median_m=q[2], farther_m=q[3])
-}))
-write_csv(road_values, file.path(out,"road_reference.csv"))
-write_json(list(primary="Two continuous road distances jointly; source by baseline cover fixed effects; actual area weights",
-  road_types=c("Traffic roads", "Land-access routes, including service routes of unknown subtype"),
-  reference="Baseline eligible land Q25/Q75; fixed across sensitivities; no outcome selection",
-  source_window_m=100, wider_window_m=200, source_contrast_m=c(25,75),
-  support="Within source by cover by other-road baseline quartile bin, focal road spans both quartiles. Result2: both road ends span source25 to75m.",
-  limitations="Distance support is not exact environmental matching; common log-distance interaction; LPM is a projection, not a probability forecast",
-  sensitivity=c("blocks1and4km", "window200", "track_only", "no_unknown_service", "no_explicit_motor_ban", "bounded_informative_subset", "leave_one_source_out")),
-  file.path(out,"plan.json"), pretty=TRUE,auto_unbox=TRUE)
-rm(reference,data); gc()
-
-make_data <- function(window_m=100, traffic="traffic_m", access="access_m") {
-  base %>% filter(source_m<=window_m,complete_environment,area_ha>0) %>%
-    mutate(traffic_distance=.data[[traffic]], access_distance=.data[[access]],
-      log_traffic=log1p(traffic_distance),log_access=log1p(access_distance),log_source=log1p(source_m))
-}
-formula <- gain_fraction ~ (log_traffic + log_access) * log_source + elev100 + slope10 +
-  temperature + rain100 + wind + burned + severity_value + severity_missing + management_class | stratum
-
-make_support <- function(d) {
-  setNames(lapply(c("traffic","access"), function(g) {
-    other <- if(g=="traffic") "access" else "traffic"
-    q <- filter(road_values,road==g)
-    oq <- filter(road_values,road==other)
-    # Fixed baseline quartiles; ties are collapsed. Bins check support, not model matching.
-    breaks <- unique(c(-Inf,oq$nearer_m,oq$median_m,oq$farther_m,Inf))
-    z <- d %>% mutate(focal=.data[[paste0(g,"_distance")]],
-      other_bin=as.integer(cut(.data[[paste0(other,"_distance")]],breaks=breaks,include.lowest=TRUE)),
-      support_id=paste(stratum,other_bin,sep="__"))
-    tab <- z %>% group_by(support_id,stratum,source_id,other_bin) %>% summarise(
-      eligible_ha=sum(area_ha),gain_ha=sum(gain_m2)/10000,
-      road_min=min(focal),road_max=max(focal),
-      near_source_min=if(any(focal<=q$nearer_m)) min(source_m[focal<=q$nearer_m]) else Inf,
-      near_source_max=if(any(focal<=q$nearer_m)) max(source_m[focal<=q$nearer_m]) else -Inf,
-      far_source_min=if(any(focal>=q$farther_m)) min(source_m[focal>=q$farther_m]) else Inf,
-      far_source_max=if(any(focal>=q$farther_m)) max(source_m[focal>=q$farther_m]) else -Inf,
-      .groups="drop") %>% mutate(road_support=road_min<=q$nearer_m & road_max>=q$farther_m,
-        both_support=road_support & near_source_min<=25 & near_source_max>=75 & far_source_min<=25 & far_source_max>=75)
-    list(table=tab, index=list(
-      `Result 1`=which(z$support_id %in% tab$support_id[tab$road_support]),
-      `Result 2`=which(z$support_id %in% tab$support_id[tab$both_support])),breaks=breaks)
-  }),c("traffic","access"))
-}
-contrast <- function(fit,d,s,g,result) {
-  target <- d[s[[g]]$index[[result]],]
-  q <- filter(road_values,road==g)
-  v <- setNames(rep(0,length(coef(fit))),names(coef(fit)))
-  dx <- log1p(q$nearer_m)-log1p(q$farther_m)
-  main_name <- paste0("log_",g)
-  interaction <- paste0(main_name,":log_source")
-  stopifnot(main_name %in% names(v),interaction %in% names(v))
-  if(nrow(target)>0) {
-    if(result=="Result 1") {
-      v[main_name] <- dx
-      v[interaction] <- dx*weighted.mean(target$log_source,target$area_ha)
-    } else v[interaction] <- dx*(log1p(75)-log1p(25))
-  } else v[] <- NA_real_
-  list(v=v,target=target)
-}
-effect <- function(fit,d,s,label,g,result,block="block2",logit=FALSE) {
-  c <- contrast(fit,d,s,g,result); target <- c$target
-  est_fraction <- se_fraction <- low <- high <- p <- NA_real_
-  if(nrow(target)>0) {
-    if(logit) {
-      q <- filter(road_values,road==g)
-      predicted_mean <- function(road,forest=NULL) {
-        new <- target
-        new[[paste0("log_",g)]] <- log1p(road)
-        if(!is.null(forest)) new$log_source <- log1p(forest)
-        weighted.mean(predict(fit,newdata=new,type="response"),target$area_ha)
-      }
-      est_fraction <- if(result=="Result 1") predicted_mean(q$nearer_m)-predicted_mean(q$farther_m) else
-        (predicted_mean(q$nearer_m,75)-predicted_mean(q$nearer_m,25))-
-        (predicted_mean(q$farther_m,75)-predicted_mean(q$farther_m,25))
-    } else {
-      V <- vcov(fit,vcov=as.formula(paste0("~source_id + ",block)))
-      est_fraction <- sum(c$v*coef(fit))
-      se_fraction <- sqrt(as.numeric(t(c$v)%*%V%*%c$v))
-      df <- min(n_distinct(d$source_id),n_distinct(d[[block]]))-1
-      low <- 100*(est_fraction-qt(.975,df)*se_fraction)
-      high <- 100*(est_fraction+qt(.975,df)*se_fraction)
-      p <- 2*pt(-abs(est_fraction/se_fraction),df)
-    }
-  }
-  n_clusters <- min(n_distinct(d$source_id),n_distinct(d[[block]]))
-  tibble(model=label,road=g,result=result,block=if(logit) "point estimate only" else block,
-    estimate=100*est_fraction,low=low,high=high,scale="percentage points",
-    reference_area_ha=sum(target$area_ha),reference_gain_ha=sum(target$gain_m2)/10000,
-    reference_sources=n_distinct(target$source_id),reference_strata=n_distinct(target$stratum),
-    clusters=n_clusters,p=p)
-}
-all_effects <- function(fit,d,s,label,block="block2",logit=FALSE) {
-  bind_rows(lapply(c("traffic","access"),function(g) bind_rows(lapply(c("Result 1","Result 2"),
-    function(r) effect(fit,d,s,label,g,r,block,logit)))))
-}
-diagnostic <- function(fit,d,label) {
-  f <- fitted(fit)
-  tibble(model=label,rows=nrow(d),area_ha=sum(d$area_ha),gain_ha=sum(d$gain_m2)/10000,
-    sources=n_distinct(d$source_id),strata=n_distinct(d$stratum),blocks2=n_distinct(d$block2),
-    weighted_outside_0_1_pct=100*weighted.mean(f<0|f>1,d$area_ha),
-    fitted_min=min(f),fitted_max=max(f),dropped_terms=paste(fit$collin.var,collapse=";"))
-}
-message("Fitting joint traffic and land-access model")
-d <- make_data(); s <- make_support(d)
-for(g in names(s)) write_csv(s[[g]]$table,file.path(out,paste0(g,"_support.csv")))
-main <- feols(formula,data=d,weights=~area_ha,vcov=~source_id+block2,demeaned=TRUE,fixef.rm="none",data.save=TRUE)
-saveRDS(main,file.path(out,"main_model.rds"))
-main_effects <- all_effects(main,d,s,"Joint roads, 100 m") %>% mutate(p_holm=p.adjust(p,"holm"))
-write_csv(main_effects,file.path(out,"main_effects.csv")); print(main_effects,width=Inf)
-diagnostics <- diagnostic(main,d,"Joint roads, 100 m")
-effects <- bind_rows(lapply(c("block1","block2","block4"),function(b) all_effects(main,d,s,"Joint roads, 100 m",b)))
-
-# Area-weighted correlation after removing each source-cover group's mean.
-wd <- d %>% group_by(stratum) %>% mutate(
-  traffic_within=log_traffic-weighted.mean(log_traffic,area_ha),
-  access_within=log_access-weighted.mean(log_access,area_ha)) %>% ungroup()
-wc <- function(x,y,w) cov.wt(cbind(x,y),wt=w,cor=TRUE)$cor[1,2]
-write_csv(tibble(kind=c("Overall log distance","Within source-cover log distance"),
-  correlation=c(wc(d$log_traffic,d$log_access,d$area_ha),wc(wd$traffic_within,wd$access_within,wd$area_ha))),
-  file.path(out,"distance_correlation.csv"))
-rm(wd); gc()
-
-settings <- list(window200=c("200","traffic_m","access_m"),
-  track_only=c("100","traffic_m","track_m"),
-  no_unknown=c("100","traffic_m","access_no_unknown_m"),
-  no_motor_ban=c("100","traffic_no_ban_m","access_no_ban_m"))
-labels <- c(window200="Joint roads, 200 m",track_only="Tracks as access routes",no_unknown="No unknown service subtype",no_motor_ban="No explicit motor bans")
-for(setting in names(settings)) {
-  a <- settings[[setting]]; ds <- make_data(as.numeric(a[1]),a[2],a[3]); ss <- make_support(ds)
-  message("Fitting ",labels[setting])
-  fit <- feols(formula,data=ds,weights=~area_ha,vcov=~source_id+block2,fixef.rm="none")
-  effects <- bind_rows(effects,all_effects(fit,ds,ss,labels[setting]))
-  diagnostics <- bind_rows(diagnostics,diagnostic(fit,ds,labels[setting]))
-  write_csv(tibble(term=names(coef(fit)),estimate=coef(fit)),file.path(out,paste0(setting,"_coefficients.csv")))
-  rm(ds,ss,fit); gc()
-}
-info <- d %>% group_by(stratum) %>% summarise(eligible_ha=sum(area_ha),gain_ha=sum(gain_m2)/10000,.groups="drop") %>%
-  filter(gain_ha>1e-9,gain_ha<eligible_ha-1e-9)
-dg <- d %>% filter(stratum %in% info$stratum); sg <- make_support(dg)
-message("Fitting bounded fractional logit on informative source-cover groups")
-fractional <- feglm(formula,data=dg,family=quasibinomial(),weights=~area_ha,vcov=~source_id+block2,glm.iter=100,data.save=TRUE)
-stopifnot(nobs(fractional)==nrow(dg))
-saveRDS(fractional,file.path(out,"fractional_model.rds"))
-effects <- bind_rows(effects,all_effects(fractional,dg,sg,"Fractional logit, informative land",logit=TRUE))
-diagnostics <- bind_rows(diagnostics,diagnostic(fractional,dg,"Fractional logit, informative land"))
-same <- feols(formula,data=dg,weights=~area_ha,vcov=~source_id+block2,fixef.rm="none",data.save=TRUE)
-saveRDS(same,file.path(out,"same_sample_model.rds"))
-effects <- bind_rows(effects,all_effects(same,dg,sg,"Linear model, same informative land"))
-diagnostics <- bind_rows(diagnostics,diagnostic(same,dg,"Linear model, same informative land"))
-write_csv(effects,file.path(out,"sensitivity_effects.csv"))
-write_csv(diagnostics,file.path(out,"model_diagnostics.csv"))
-
-X <- main$X_demeaned[,names(coef(main)),drop=FALSE]; y <- main$y_demeaned
-Xw <- X*sqrt(d$area_ha); yw <- y*sqrt(d$area_ha)
-A <- crossprod(Xw); b <- crossprod(Xw,yw)
-vectors <- lapply(c("traffic","access"),function(g) lapply(c("Result 1","Result 2"),function(r) contrast(main,d,s,g,r)$v))
-Vcontrast <- do.call(rbind,unlist(vectors,recursive=FALSE))
-colnames(Vcontrast) <- names(coef(main))
-rownames(Vcontrast) <- c("traffic_result1","traffic_result2","access_result1","access_result2")
-groups <- split(seq_len(nrow(d)),d$source_id)
-message("Whole-source influence check for ",length(groups)," sources")
-loo <- bind_rows(lapply(names(groups),function(id) {
-  k <- groups[[id]]
-  beta <- tryCatch(solve(A-crossprod(Xw[k,,drop=FALSE]),b-crossprod(Xw[k,,drop=FALSE],yw[k])),
-    error=function(e) rep(NA_real_,ncol(Xw)))
-  vals <- as.numeric(100*Vcontrast%*%beta)
-  tibble(omitted_source=id,traffic_result1=vals[1],traffic_result2=vals[2],access_result1=vals[3],access_result2=vals[4],omitted_area_ha=sum(d$area_ha[k]))
-}))
-write_csv(loo,file.path(out,"leave_one_source_out.csv"))
-summary <- tibble(window_m=c(100,200)) %>% rowwise() %>% mutate(
-  eligible_ha=sum(base$area_ha[base$source_m<=window_m]),gain_ha=sum(base$gain_m2[base$source_m<=window_m])/10000,
-  incomplete_environment_ha=sum(base$area_ha[base$source_m<=window_m & !base$complete_environment]),
-  sources=n_distinct(base$source_id[base$source_m<=window_m])) %>% ungroup()
-write_csv(summary,file.path(out,"population.csv"))
-raw_rates <- bind_rows(lapply(c("traffic","access"),function(g) {
-  q <- filter(road_values,road==g)
-  d %>% mutate(road=g,road_band=case_when(.data[[paste0(g,"_distance")]]<=q$nearer_m ~ "Near quarter",
-    .data[[paste0(g,"_distance")]]>=q$farther_m ~ "Far quarter",TRUE ~ "Middle half"),
-    source_band=cut(source_m,c(-Inf,25,50,75,100),labels=c("0-25","25-50","50-75","75-100"))) %>%
-    group_by(road,road_band,source_band) %>% summarise(eligible_ha=sum(area_ha),gain_ha=sum(gain_m2)/10000,
-      gain_pct=100*gain_ha/eligible_ha,.groups="drop")
-}))
-write_csv(raw_rates,file.path(out,"raw_distance_rates.csv"))
-write_json(list(fixest_version=as.character(packageVersion("fixest")),fractional_converged=fractional$convStatus,
-  fractional_removed_observations=nrow(dg)-nobs(fractional),linear_rows=nrow(d),logit_rows=nrow(dg),
-  logit_omitted_area_ha=sum(d$area_ha)-sum(dg$area_ha),logit_sources=n_distinct(dg$source_id),
-  logit_strata=n_distinct(dg$stratum),main_support_bins=lapply(s,function(x) x$breaks)),
-  file.path(out,"fit_status.json"),auto_unbox=TRUE,pretty=TRUE)
-message("Joint road models complete")
-
-}
-```
-
-```{r}
-#| label: read-selected-results
-#| include: false
-result_file <- function(name) file.path(analysis_cache,"model",name)
-main_effects <- read_csv(result_file("main_effects.csv"),show_col_types=FALSE)
-sensitivity <- read_csv(result_file("sensitivity_effects.csv"),show_col_types=FALSE)
-diagnostics <- read_csv(result_file("model_diagnostics.csv"),show_col_types=FALSE)
-population <- read_csv(result_file("population.csv"),show_col_types=FALSE)
-raw_rates <- read_csv(result_file("raw_distance_rates.csv"),show_col_types=FALSE)
-loo <- read_csv(result_file("leave_one_source_out.csv"),show_col_types=FALSE)
-rv <- read_csv(result_file("road_reference.csv"),show_col_types=FALSE)
-road_labels <- c(traffic="Traffic roads",access="Land-access routes")
-raw_rates <- raw_rates %>% mutate(Road=recode(road,!!!road_labels),
-  road_band=factor(road_band,levels=c("Near quarter","Middle half","Far quarter")))
-raw_road <- raw_rates %>% group_by(Road,road_band) %>% summarise(
-  eligible_ha=sum(eligible_ha),gain_ha=sum(gain_ha),.groups="drop") %>% mutate(gain_pct=100*gain_ha/eligible_ha)
-pp <- function(x) sprintf("%+.2f",x)
-result_table <- function(which_result) {
-  main_effects %>% filter(result==which_result) %>% transmute(
-    Road=recode(road,!!!road_labels),`Difference (pp)`=pp(estimate),
-    `95% interval`=sprintf("%.2f to %.2f",low,high),`Sources`=reference_sources,
-    `Area (ha)`=round(reference_area_ha)) %>% knitr::kable(format="pipe",align=c("l","r","l","r","r"))
-}
-```
-
-\newpage
 
 ## How we compare land
 
-1. Start with every mapped **2018 eucalyptus source feature**, before looking at 2025 changes.
-2. Measure eligible non-eucalyptus land within **100 m of the nearest source**: agriculture, pasture, agroforestry, other forest and shrub cover. Exclude artificial surfaces, bare land, wetlands and water. Use 200 m as a wider check. Count each piece of land once.
-3. Divide this land into 20 m accounting cells, retaining the **actual area** of each original land-cover fragment. Use a point inside the fragment for distances and environmental values. The cell is not one tree, and it does not improve the accuracy of the original maps.
-4. Model the fraction of each piece mapped as eucalyptus in 2025, weighted by its eligible area. Compare variation within the **same source feature and original land-cover class**. Also include source distance, both road distances, elevation, slope, temperature, rain, wind, measured 2017 fire history and the 2015 forest-management label.
+Each initially non-eucalyptus fragment is assigned to its nearest 2018 eucalyptus source feature and its starting land-cover class. We compare new cover as a fraction of eligible land area, using area weights. Large amounts of far-road land therefore do not receive the same denominator as a small amount of near-road land. Source-by-cover groups have their own intercepts; terrain, climate, wind, fire history and management are included in the model. This is statistical adjustment, not one-to-one matching.
 
-The main model includes `r population$sources[1]` source features, `r sprintf("%.1f",population$eligible_ha[1])` ha of eligible land and `r sprintf("%.1f",population$gain_ha[1])` ha of mapped gain. Source features can touch or contain several parts; they are not necessarily separate biological stands.
-
-**A fair comparison needs available land on both sides.** For each road type we compare the area-weighted lower and upper quarters of baseline road distance:
+The 20 m cells are accounting units, not individual trees or independent samples. The main window is 100 m from old forest. It defines the nearby forest-edge landscape; it is not a measured seed-flight distance. The 25–75 m contrast describes change inside this window. Road references are the baseline eligible-area quartiles, selected without using the gain outcome. Confidence intervals allow shared source features and shared 2 km spatial blocks; 2 km is an uncertainty grouping, not a dispersal distance.
 
 ```{r}
-#| label: road-reference-table
-rv %>% transmute(Road=recode(road,!!!road_labels),
-  `Nearer (m)`=round(nearer_m),`Farther (m)`=round(farther_m)) %>% knitr::kable(format="pipe")
-```
-
-For the reported contrasts, a source/cover group must span both distances **within a similar distance range of the other road type**. Those other-road ranges are four baseline distance bands. Result 2 additionally requires locations from 25 to 75 m outside the old forest at both road-distance ends. We report the resulting reference areas with each result. These checks reduce extrapolation; they do not make every environmental condition identical.
-
-The model uses log(1 + distance), with each road distance interacting with source distance. Other continuous environmental adjustments are linear. The main linear model includes all eligible land, including groups with no gain. It estimates adjusted differences, not absolute conversion probabilities. A bounded fractional-logit model checks this choice on groups with some conversion.
-
-The 100 m window follows the scale used in an earlier eucalyptus mapping study. The 200 m check, road quartiles and 25-to-75 m comparison are analysis choices, not known limits to seed travel. Climate values are long-term averages, not local weather during dispersal.
-
-\newpage
-
-## Result 1
-
-**Is mapped eucalyptus gain greater near roads?** First, the observed percentage uses new eucalyptus area divided by all eligible land in that distance band.
-
-```{r}
-#| label: selected-raw-rates
-#| fig-height: 2.7
-#| fig-width: 6.4
-ggplot(raw_road,aes(road_band,gain_pct)) +
-  geom_col(fill="#326B7B",width=.65) +
-  geom_text(aes(label=sprintf("%.2f%%",gain_pct)),vjust=-.4,size=3.4) +
-  facet_wrap(~Road,nrow=1) + scale_y_continuous(expand=expansion(mult=c(0,.22))) +
-  labs(x="Baseline road-distance group",y="Observed mapped gain (%)") +
-  theme_minimal(base_size=10) + theme(panel.grid.minor=element_blank(),axis.text.x=element_text(size=8))
-```
-
-These bars do not control for the surrounding land. After adjusting for the source forest, original cover, measured environment and the other road type, the **nearer-minus-farther** differences were:
-
-```{r}
-#| label: selected-result1-table
-result_table("Result 1")
-```
-
-Positive values would support more gain nearer roads. Both estimates are small and negative, but **both uncertainty intervals include zero and positive values**. The data therefore do not give clear support for greater gain near either road group. They also do not establish that roads reduce gain or have no effect.
-
-The two rows use different supported reference areas and reference distances. Their effect sizes should not be ranked as if they were the same experiment. The area denominators account for the fact that more land may be available far from a road.
-
-\newpage
-
-## Result 2
-
-**Does gain decline less with distance from old eucalyptus near roads?** The graph below shows observed change before environmental adjustment.
-
-```{r}
-#| label: selected-source-distance
-#| fig-height: 3.0
-#| fig-width: 6.4
-plot_distance <- raw_rates %>% mutate(midpoint=c("0-25"=12.5,"25-50"=37.5,"50-75"=62.5,"75-100"=87.5)[source_band])
-ggplot(plot_distance,aes(midpoint,gain_pct,colour=road_band,shape=road_band)) +
-  geom_line(linewidth=.65) + geom_point(size=2) + facet_wrap(~Road,nrow=1) +
-  scale_colour_manual(values=c("#2166AC","#777777","#B35806")) +
-  scale_x_continuous(breaks=c(12.5,37.5,62.5,87.5),labels=c("0-25","25-50","50-75","75-100")) +
-  labs(x="Distance from old eucalyptus (m)",y="Observed mapped gain (%)",colour=NULL,shape=NULL) +
-  theme_minimal(base_size=10) + theme(legend.position="bottom",panel.grid.minor=element_blank(),axis.text.x=element_text(size=8),panel.spacing.x=grid::unit(1.8,"lines"))
-```
-
-For the adjusted test, we measure the change from **25 to 75 m outside old eucalyptus** at each reference road distance. We then subtract the farther-road change from the nearer-road change. A positive value agrees with the prediction that mapped gain declines less near roads.
-
-```{r}
-#| label: selected-result2-table
-result_table("Result 2")
-```
-
-The traffic-road estimate is slightly positive and the access-route estimate slightly negative. Both intervals cover zero and both directions. **Neither gives a clear road-related difference in the distance pattern.** This describes mapped forest conversion, not how far individual seeds travelled.
-
-\newpage
-
-## Result 3
-
-**On baseline pine land covered by fire, was eucalyptus conversion greater near roads?**
-
-```{r}
-#| label: selected-burned-pine
+#| label: combined-road-fit
 #| include: false
-fire_file <- file.path(analysis_cache,"fire.rds")
-if (!file.exists(fire_file)) {
-# Rebuild the unchanged burned 2018 maritime-pine area and environmental values.
-# input(name) points to the review's flat Raw Data directory.
-suppressPackageStartupMessages({library(sf); library(terra); library(dplyr)})
-f3_land18 <- read_sf(input('land_cover.gpkg'), 'land2018')
-f3_pine18 <- f3_land18 %>% filter(cover_code == '5.1.2.1') %>% select(pine_id = source_id)
-f3_fires <- read_sf(input('fires.gpkg'), 'fires') %>%
-  filter(between(year, 2019, 2024)) %>% select(year, event_id)
-f3_pieces <- suppressWarnings(st_intersection(f3_pine18, f3_fires)) %>%
-  filter(as.numeric(st_area(.)) > 1e-6)
-f3_pieces <- suppressWarnings(st_collection_extract(f3_pieces, 'POLYGON'))
-f3_pieces <- f3_pieces %>% group_by(pine_id, year, event_id) %>% summarise(.groups = 'drop')
-f3_euc25 <- read_sf(input('land_cover.gpkg'), 'euc2025')
-f3_pine25 <- read_sf(input('pine2025.gpkg'), 'pine2025')
-f3_euc18 <- read_sf(input('land_cover.gpkg'), 'euc2018')
-f3_study <- read_sf(input('land_cover.gpkg'), 'study_area')
-f3_bounds <- st_bbox(f3_study)
-f3_grid <- rast(xmin = 20 * floor(f3_bounds['xmin'] / 20), xmax = 20 * ceiling(f3_bounds['xmax'] / 20),
-  ymin = 20 * floor(f3_bounds['ymin'] / 20), ymax = 20 * ceiling(f3_bounds['ymax'] / 20),
-  resolution = 20, crs = 'EPSG:3763')
-values(f3_grid) <- 1
-# Construct only cells intersecting a fire/pine polygon, rather than a national grid.
-f3_hit <- terra::extract(f3_grid, vect(f3_pieces), cells = TRUE, exact = TRUE)
-f3_cells <- sort(unique(f3_hit$cell[!is.na(f3_hit$cell)]))
-f3_xy <- xyFromCell(f3_grid, f3_cells)
-f3_square <- function(i) {
-  x <- f3_xy[i, 1]; y <- f3_xy[i, 2]
-  st_polygon(list(matrix(c(x-10,y-10, x+10,y-10, x+10,y+10, x-10,y+10, x-10,y-10), ncol=2, byrow=TRUE)))
+library(dplyr)
+library(fixest)
+library(ggplot2)
+setFixest_nthreads(2)
+
+# The earlier area-preparation chunks create this from the relative Raw Data inputs.
+# No saved coefficient, result table, or work-folder path is required.
+combined_base <- readRDS(file.path(analysis_cache, "data/analysis_data.rds")) %>%
+  mutate(
+    area_ha = eligible_m2 / 10000,
+    gain_fraction = gain_m2 / eligible_m2,
+    stratum = paste(source_id, cover_code, sep = "_"),
+    management_class = factor(case_when(
+      is.na(management) ~ "Unknown",
+      management %in% c(31, 32) ~ "Planted",
+      TRUE ~ "Other")),
+    burned = as.integer(burned > 0),
+    severity_missing = as.integer(burned == 1 &
+      (!is.finite(severity) | !is.finite(quality) | quality <= 0)),
+    severity_value = if_else(burned == 1 & severity_missing == 0, severity, 0),
+    elev100 = elevation / 100,
+    slope10 = slope / 10,
+    rain100 = rain / 100,
+    block2 = paste(floor(x_m / 2000), floor(y_m / 2000)),
+    road_m = pmin(traffic_m, access_m),
+    log_road = log1p(road_m),
+    log_source = log1p(source_m))
+
+# Area-weighted references are set before checking environmental completeness.
+# Middle road distances are retained in the model.
+combined_baseline <- combined_base %>% filter(source_m <= 100, area_ha > 0)
+combined_quantile <- function(x, w, probabilities) {
+  order_x <- order(x)
+  x[order_x][vapply(probabilities, function(p)
+    which(cumsum(w[order_x]) / sum(w) >= p)[1], integer(1))]
 }
-f3_cell_sf <- st_sf(cell = f3_cells, geometry = st_sfc(lapply(seq_along(f3_cells), f3_square), crs = 3763))
-f3_units <- suppressWarnings(st_intersection(f3_pieces, f3_cell_sf)) %>%
-  group_by(cell, pine_id, year, event_id) %>% summarise(.groups = 'drop') %>%
-  mutate(eligible_ha = as.numeric(st_area(.)) / 10000) %>% filter(eligible_ha > 1e-10) %>%
-  mutate(unit_id = row_number())
-f3_outcome <- function(cover) {
-  suppressWarnings(st_intersection(f3_units %>% select(unit_id), st_geometry(cover))) %>%
-    mutate(area_ha = as.numeric(st_area(.)) / 10000) %>% st_drop_geometry() %>%
-    group_by(unit_id) %>% summarise(area_ha = sum(area_ha), .groups = 'drop')
+combined_q <- combined_quantile(combined_baseline$road_m,
+  combined_baseline$area_ha, c(.25, .5, .75))
+combined_reference <- tibble(near_m = combined_q[1],
+  median_m = combined_q[2], far_m = combined_q[3])
+
+combined_required <- c("elev100", "slope10", "temperature", "rain100",
+  "wind", "burned", "source_m", "traffic_m", "access_m")
+combined_baseline$complete_environment <- apply(
+  is.finite(as.matrix(combined_baseline[combined_required])), 1, all)
+combined_data <- combined_baseline %>% filter(complete_environment)
+rm(combined_base, combined_baseline)
+
+combined_support <- combined_data %>%
+  group_by(stratum, source_id) %>%
+  summarise(
+    road_min = min(road_m), road_max = max(road_m),
+    near_source_min = if (any(road_m <= combined_q[1]))
+      min(source_m[road_m <= combined_q[1]]) else Inf,
+    near_source_max = if (any(road_m <= combined_q[1]))
+      max(source_m[road_m <= combined_q[1]]) else -Inf,
+    far_source_min = if (any(road_m >= combined_q[3]))
+      min(source_m[road_m >= combined_q[3]]) else Inf,
+    far_source_max = if (any(road_m >= combined_q[3]))
+      max(source_m[road_m >= combined_q[3]]) else -Inf,
+    .groups = "drop") %>%
+  mutate(
+    road_support = road_min <= combined_q[1] & road_max >= combined_q[3],
+    both_support = road_support & near_source_min <= 25 &
+      near_source_max >= 75 & far_source_min <= 25 & far_source_max >= 75)
+
+# All complete eligible rows enter the fit. Support defines reporting populations.
+combined_fit <- feols(
+  gain_fraction ~ log_road * log_source + elev100 + slope10 +
+    temperature + rain100 + wind + burned + severity_value +
+    severity_missing + management_class | stratum,
+  data = combined_data, weights = ~area_ha, vcov = ~source_id + block2,
+  demeaned = TRUE, fixef.rm = "none")
+combined_beta <- coef(combined_fit)
+combined_V <- vcov(combined_fit, vcov = ~source_id + block2)
+combined_V <- combined_V[names(combined_beta), names(combined_beta), drop = FALSE]
+combined_df <- min(n_distinct(combined_data$source_id),
+  n_distinct(combined_data$block2)) - 1
+combined_critical <- qt(.975, combined_df)
+
+combined_contrast <- function(weights) {
+  estimate <- 100 * sum(weights * combined_beta)
+  se <- 100 * sqrt(as.numeric(t(weights) %*% combined_V %*% weights))
+  tibble(estimate_pp = estimate, se_pp = se,
+    low_pp = estimate - combined_critical * se,
+    high_pp = estimate + combined_critical * se,
+    cluster_df = combined_df)
 }
-f3_units <- f3_units %>%
-  left_join(rename(f3_outcome(f3_euc25), euc25_ha = area_ha), by = 'unit_id') %>%
-  left_join(rename(f3_outcome(f3_pine25), pine25_ha = area_ha), by = 'unit_id') %>%
-  mutate(euc25_ha = coalesce(euc25_ha, 0), pine25_ha = coalesce(pine25_ha, 0))
-# Remove only floating-point overlap noise, less than 0.0001 square metres.
-f3_units$euc25_ha[f3_units$euc25_ha < 1e-8] <- 0
-stopifnot(abs(sum(f3_units$eligible_ha) - sum(as.numeric(st_area(f3_pieces))) / 10000) < 1e-6,
-  all(f3_units$euc25_ha <= f3_units$eligible_ha + 1e-8),
-  all(f3_units$pine25_ha + f3_units$euc25_ha <= f3_units$eligible_ha + 1e-8),
-  !anyDuplicated(st_drop_geometry(f3_units)[c('cell','event_id','pine_id')]))
-# Geometry arithmetic can exceed a cell's area by a few floating-point digits.
-f3_rounding <- tibble(units=sum(f3_units$euc25_ha>f3_units$eligible_ha),
-  area_ha=sum(pmax(f3_units$euc25_ha-f3_units$eligible_ha,0)))
-f3_units$euc25_ha <- pmin(f3_units$euc25_ha,f3_units$eligible_ha)
-f3_points <- suppressWarnings(st_point_on_surface(f3_units))
-f3_distance <- function(features) {
-  nearest <- st_nearest_feature(f3_points, features)
-  as.numeric(st_distance(st_geometry(f3_points), st_geometry(features)[nearest], by_element = TRUE))
-}
-f3_units$forest_m <- f3_distance(f3_euc18)
-f3_nearest_euc <- st_nearest_feature(f3_points, f3_euc18)
-f3_units$euc18_id <- f3_euc18$source_id[f3_nearest_euc]
-f3_point_xy <- st_coordinates(f3_points)
-f3_units$x_m <- f3_point_xy[,1]; f3_units$y_m <- f3_point_xy[,2]
-
-# Rebuild the same nine environmental layers on the existing 20 m accounting grid.
-f3_dem <- rast(input('copernicus_glo30.tif'))
-f3_dem_extent <- ext(vect(st_transform(f3_study, crs(f3_dem))))
-f3_dem <- crop(f3_dem, extend(f3_dem_extent, 2 * res(f3_dem)[1]), snap='out')
-f3_slope <- terrain(f3_dem, v='slope', unit='degrees', neighbors=8)
-f3_align <- function(layer) terra::project(layer, f3_grid, method='near')
-f3_history <- read_sf(input('fires.gpkg'), 'fires') %>% filter(year==2017)
-f3_env <- c(f3_align(c(f3_dem, f3_slope)), f3_align(rast(input('climate.tif'))),
-  f3_align(rast(input('forest_management_2015.tif'))),
-  rasterize(vect(f3_history), f3_grid, field=1, background=0),
-  f3_align(rast(input('fire_dnbr_2017.tif'))), f3_align(rast(input('fire_confidence_2017.tif'))))
-names(f3_env) <- c('elevation','slope','temperature','rain','wind','management','burned','severity','quality')
-f3_environment <- terra::extract(f3_env, vect(f3_points)) %>% select(-ID)
-f3_data <- bind_cols(st_drop_geometry(f3_units), f3_environment) %>%
-  mutate(gain_fraction=euc25_ha/eligible_ha, log_forest=log1p(forest_m),
-    planted=if_else(is.na(management),NA_integer_,as.integer(management %in% c(31,32))),
-    severity_2017=if_else(burned==0,0,if_else(quality>0,severity,NA_real_)))
-
-
-# Input: the unchanged exact fire/pine fragments and the selected 2018 road lines.
-# No cell-level standard errors: only three fires have mapped eucalyptus gain.
-suppressPackageStartupMessages({library(sf); library(dplyr); library(ggplot2)})
-
-f3_weighted_quantile <- function(x, w, probabilities = c(.25, .75)) {
-  ordered <- order(x)
-  x <- x[ordered]; cumulative <- cumsum(w[ordered]) / sum(w)
-  vapply(probabilities, function(p) x[which(cumulative >= p)[1]], numeric(1))
-}
-
-f3_in_hull <- function(observed, query) {
-  boundary <- unique(observed[chull(observed), , drop = FALSE])
-  if (nrow(boundary) < 3) return(rep(FALSE, nrow(query)))
-  boundary <- rbind(boundary, boundary[1, ])
-  products <- vapply(seq_len(nrow(boundary) - 1), function(i) {
-    (boundary[i+1,1] - boundary[i,1]) * (query[,2] - boundary[i,2]) -
-      (boundary[i+1,2] - boundary[i,2]) * (query[,1] - boundary[i,1])
-  }, numeric(nrow(query)))
-  apply(products >= -1e-10, 1, all) | apply(products <= 1e-10, 1, all)
+combined_target_summary <- function(z) {
+  tibble(rows = nrow(z), reference_area_ha = sum(z$area_ha),
+    reference_sources = n_distinct(z$source_id),
+    reference_strata = n_distinct(z$stratum))
 }
 
-f3_fit_selected <- function(data, variables) {
-  complete <- data %>% filter(if_all(all_of(variables), ~ is.finite(.x)))
-  groups <- complete %>% group_by(event_id) %>%
-    summarise(land_ha = sum(eligible_ha), gain_ha = sum(euc25_ha),
-      traffic_range = diff(range(log_traffic)), access_range = diff(range(log_access)), .groups = 'drop')
-  supported <- groups %>% filter(gain_ha > 1e-8, gain_ha < land_ha - 1e-8,
-    traffic_range > 1e-8, access_range > 1e-8)
-  selected <- complete %>% filter(event_id %in% supported$event_id) %>%
-    mutate(event_id = factor(event_id))
-  terms <- c(variables, if (nlevels(selected$event_id) > 1) 'event_id')
-  fit <- glm(reformulate(terms, response = 'gain_fraction'), data = selected,
-    family = quasibinomial(), weights = eligible_ha, control = glm.control(maxit = 100))
-  list(model = fit, data = selected, groups = groups,
-    counts = tibble(events = nrow(supported), land_ha = sum(selected$eligible_ha),
-      gain_ha = sum(selected$euc25_ha), units = nrow(selected), converged = fit$converged,
-      finite_coefficients = all(is.finite(coef(fit))), rank = fit$rank,
-      coefficients = length(coef(fit)),
-      traffic_coefficient = unname(coef(fit)['log_traffic']),
-      access_coefficient = unname(coef(fit)['log_access'])))
-}
+combined_target1 <- combined_data %>%
+  filter(stratum %in% combined_support$stratum[combined_support$road_support])
+combined_target2 <- combined_data %>%
+  filter(stratum %in% combined_support$stratum[combined_support$both_support])
+combined_dx <- log1p(combined_q[1]) - log1p(combined_q[3])
 
-f3_contrast <- function(fitted, reference) {
-  bind_rows(lapply(c('traffic', 'access'), function(road) {
-    distance <- paste0(road, '_m'); log_distance <- paste0('log_', road)
-    near <- reference$near_m[reference$road == road]
-    far <- reference$far_m[reference$road == road]
-    range_support <- fitted$data %>% group_by(event_id) %>%
-      summarise(min_m = min(.data[[distance]]), max_m = max(.data[[distance]]), .groups = 'drop') %>%
-      filter(min_m <= near, max_m >= far)
-    target <- fitted$data %>% filter(event_id %in% range_support$event_id)
-    if (nrow(target) == 0) return(tibble(road = road, near_m = near, far_m = far,
-      events = 0L, land_ha = 0, gain_ha = 0, near_pct = NA_real_, far_pct = NA_real_,
-      difference_pp = NA_real_, outside_road_hull_pct = NA_real_,
-      joint_supported_ha = 0, joint_supported_difference_pp = NA_real_))
-    near_data <- far_data <- target
-    near_data[[log_distance]] <- log1p(near)
-    far_data[[log_distance]] <- log1p(far)
-    near_prediction <- predict(fitted$model, newdata = near_data, type = 'response')
-    far_prediction <- predict(fitted$model, newdata = far_data, type = 'response')
-    near_pct <- 100 * weighted.mean(near_prediction, target$eligible_ha)
-    far_pct <- 100 * weighted.mean(far_prediction, target$eligible_ha)
-    joint_ok <- rep(FALSE, nrow(target))
-    for (fire in unique(as.character(target$event_id))) {
-      rows <- which(as.character(target$event_id) == fire)
-      observed <- fitted$data %>% filter(as.character(event_id) == fire) %>%
-        select(log_traffic, log_access) %>% as.matrix()
-      near_xy <- as.matrix(near_data[rows, c('log_traffic', 'log_access')])
-      far_xy <- as.matrix(far_data[rows, c('log_traffic', 'log_access')])
-      joint_ok[rows] <- f3_in_hull(observed, near_xy) & f3_in_hull(observed, far_xy)
-    }
-    tibble(road = road, near_m = near, far_m = far, events = nrow(range_support),
-      land_ha = sum(target$eligible_ha), gain_ha = sum(target$euc25_ha),
-      near_pct = near_pct, far_pct = far_pct, difference_pp = near_pct - far_pct,
-      outside_road_hull_pct = 100 * weighted.mean(!joint_ok, target$eligible_ha),
-      joint_supported_ha = sum(target$eligible_ha[joint_ok]),
-      joint_supported_difference_pp = if (any(joint_ok)) 100 *
-        weighted.mean((near_prediction - far_prediction)[joint_ok], target$eligible_ha[joint_ok]) else NA_real_)
-  }))
-}
+# H1: near minus far, averaged over supported land by eligible area.
+combined_c1 <- setNames(rep(0, length(combined_beta)), names(combined_beta))
+combined_c1["log_road"] <- combined_dx
+combined_c1["log_road:log_source"] <- combined_dx *
+  weighted.mean(combined_target1$log_source, combined_target1$area_ha)
+combined_result1 <- bind_cols(tibble(result = "Result 1"),
+  combined_contrast(combined_c1), combined_target_summary(combined_target1))
 
-f3_selected_analysis <- function(base_data, roads) {
-  stopifnot(all(c('traffic', 'access') %in% roads$group), st_crs(roads)$epsg == 3763,
-    all(base_data$eligible_ha > 0), all(base_data$gain_fraction >= 0), all(base_data$gain_fraction <= 1))
-  points <- st_as_sf(base_data, coords = c('x_m', 'y_m'), remove = FALSE, crs = 3763)
-  distance_to <- function(lines) {
-    nearest <- st_nearest_feature(points, lines)
-    as.numeric(st_distance(st_geometry(points), st_geometry(lines)[nearest], by_element = TRUE))
-  }
-  data <- base_data %>% mutate(traffic_m = distance_to(filter(roads, group == 'traffic')),
-    access_m = distance_to(filter(roads, group == 'access')),
-    log_traffic = log1p(traffic_m), log_access = log1p(access_m), log_forest = log1p(forest_m))
-  reference <- bind_rows(lapply(c('traffic', 'access'), function(road) {
-    q <- f3_weighted_quantile(data[[paste0(road, '_m')]], data$eligible_ha)
-    tibble(road = road, near_m = q[1], far_m = q[2], reference_ha = sum(data$eligible_ha))
-  }))
-  variables <- list(distance = c('log_traffic', 'log_access', 'log_forest'),
-    terrain = c('log_traffic', 'log_access', 'log_forest', 'elevation', 'slope'),
-    full = c('log_traffic', 'log_access', 'log_forest', 'elevation', 'slope',
-      'temperature', 'rain', 'wind', 'planted', 'severity_2017'))
-  fits <- lapply(variables, function(v) f3_fit_selected(data, v))
-  same_sample <- f3_fit_selected(fits$full$data, variables$distance)
-  fits$distance_on_full_sample <- same_sample
-  model_summary <- bind_rows(lapply(fits, '[[', 'counts'), .id = 'model')
-  contrasts <- bind_rows(lapply(fits, f3_contrast, reference = reference), .id = 'model')
-  informative <- levels(fits$distance$data$event_id)
-  loo_fits <- setNames(lapply(informative, function(fire) {
-    f3_fit_selected(filter(data, event_id != fire), variables$distance)
-  }), informative)
-  loo <- bind_rows(lapply(loo_fits, '[[', 'counts'), .id = 'left_out')
-  loo_contrasts <- bind_rows(lapply(loo_fits, f3_contrast, reference = reference), .id = 'left_out')
-  event_fits <- setNames(lapply(informative, function(fire) {
-    f3_fit_selected(filter(data, event_id == fire), variables$distance)
-  }), informative)
-  event_estimates <- bind_rows(lapply(event_fits, '[[', 'counts'), .id = 'event_id')
-  event_contrasts <- bind_rows(lapply(event_fits, f3_contrast, reference = reference), .id = 'event_id')
-  by_event <- data %>% group_by(year, event_id) %>%
-    summarise(land_ha = sum(eligible_ha), gain_ha = sum(euc25_ha), retained_pine_ha = sum(pine25_ha),
-      changed_pct = 100 * gain_ha / land_ha, units = n(),
-      across(c(traffic_m, access_m, forest_m), list(min = min, max = max,
-        mean = ~ weighted.mean(.x, eligible_ha))), .groups = 'drop') %>%
-    rename(eligible_ha = land_ha, euc25_ha = gain_ha, pine25_ha = retained_pine_ha)
-  summary <- tibble(fires = nrow(by_event), pine_ha = sum(data$eligible_ha),
-    gain_ha = sum(data$euc25_ha), still_pine_ha = sum(data$pine25_ha), units = nrow(data),
-    with_gain = sum(by_event$euc25_ha > 1e-8),
-    largest_gain_share = 100 * max(by_event$euc25_ha) / sum(by_event$euc25_ha))
-  # Unknown service and explicit restrictions are diagnosed when supplied in the road layer.
-  road_sets <- list(track_only = filter(roads, group == 'traffic' | highway == 'track'))
-  if ('access_unknown' %in% names(roads)) road_sets$no_unknown_service <-
-    filter(roads, group == 'traffic' | !access_unknown)
-  if ('explicit_motor_no' %in% names(roads)) road_sets$no_explicit_motor_ban <-
-    filter(roads, !explicit_motor_no)
-  sensitivity <- lapply(road_sets, function(lines) {
-    changed <- data %>% mutate(traffic_m = distance_to(filter(lines, group == 'traffic')),
-      access_m = distance_to(filter(lines, group == 'access')),
-      log_traffic = log1p(traffic_m), log_access = log1p(access_m))
-    fitted <- f3_fit_selected(changed, variables$distance)
-    list(fit = fitted, contrast = f3_contrast(fitted, reference))
-  })
-  sensitivity_summary <- bind_rows(lapply(sensitivity, function(x) x$fit$counts), .id = 'definition')
-  sensitivity_contrasts <- bind_rows(lapply(sensitivity, '[[', 'contrast'), .id = 'definition')
-  support <- fits$distance$data %>% group_by(event_id) %>%
-    summarise(land_ha = sum(eligible_ha), gain_ha = sum(euc25_ha),
-      across(c(elevation, slope, temperature, rain, wind, planted, severity_2017),
-        list(min = ~ min(.x, na.rm = TRUE), max = ~ max(.x, na.rm = TRUE),
-          missing_ha = ~ sum(eligible_ha[!is.finite(.x)]))),
-      traffic_access_correlation = cor(log_traffic, log_access), .groups = 'drop')
-  list(data = data, by_event = by_event, summary = summary, reference = reference, fits = fits,
-    model_summary = model_summary, contrasts = contrasts, loo = loo, loo_contrasts = loo_contrasts,
-    event_estimates = event_estimates, event_contrasts = event_contrasts, sensitivity = sensitivity,
-    sensitivity_summary = sensitivity_summary, sensitivity_contrasts = sensitivity_contrasts, support = support)
-}
+# H2: near minus far difference in the source-distance change from 25 to 75 m.
+combined_c2 <- setNames(rep(0, length(combined_beta)), names(combined_beta))
+combined_c2["log_road:log_source"] <- combined_dx * (log1p(75) - log1p(25))
+combined_result2 <- bind_cols(tibble(result = "Result 2"),
+  combined_contrast(combined_c2), combined_target_summary(combined_target2))
+combined_results <- bind_rows(combined_result1, combined_result2)
+combined_outside_pct <- 100 * weighted.mean(
+  fitted(combined_fit) < 0 | fitted(combined_fit) > 1, combined_data$area_ha)
 
-f3 <- f3_selected_analysis(f3_data,read_sf(input("roads2018_selected.gpkg"),"roads"))
-saveRDS(f3,fire_file)
-}
-f3 <- readRDS(fire_file)
+stopifnot(nobs(combined_fit) == nrow(combined_data),
+  nrow(combined_target1) > 0, nrow(combined_target2) > 0)
 ```
-
-The same 18 fire footprints from 2019--2024 overlap **176.23 ha of maritime-pine land** mapped in 2018. In 2025, **17.33 ha** is mapped as eucalyptus. Only **three fires** contain this change. The model compares places within each of these fires, controlling both road distances and distance to old eucalyptus. The other 15 fires remain in the area totals but cannot estimate a finite within-fire logistic relationship.
-
-For traffic roads the comparison is `r round(f3$reference$near_m[1])` versus `r round(f3$reference$far_m[1])` m; for land-access routes it is `r round(f3$reference$near_m[2])` versus `r round(f3$reference$far_m[2])` m. These quartiles come from all baseline burned-pine land. Each contrast keeps the other road distance observed and uses fires spanning both distances. Each displayed comparison is supported by only two fires.
 
 ```{r}
-#| label: selected-fire-models
-#| fig-height: 3.1
-#| fig-width: 6.4
-fire_plot <- f3$contrasts %>% filter(model %in% c("distance","terrain","full")) %>%
-  mutate(Road=recode(road,!!!road_labels),
-    Adjustment=factor(model,levels=c("full","terrain","distance"),labels=c("Full environment","+ Terrain","Source distance")))
-ggplot(fire_plot,aes(difference_pp,Adjustment)) +
-  geom_vline(xintercept=0,colour="grey65") + geom_point(size=2.5,colour="#326B7B") +
-  geom_text(aes(label=sprintf("%.2f",difference_pp)),vjust=-.8,size=3) +
-  facet_wrap(~Road,ncol=1) + scale_x_continuous(expand=expansion(mult=c(.12,.12))) +
-  labs(x="Nearer minus farther (percentage points)",y=NULL) +
-  theme_minimal(base_size=9) + theme(panel.grid.minor=element_blank())
+#| label: combined-road-curves
+#| include: false
+combined_curves <- bind_rows(lapply(c("Near", "Far"), function(side) {
+  road_reference <- if (side == "Near") combined_q[1] else combined_q[3]
+  direction <- setNames(rep(0, length(combined_beta)), names(combined_beta))
+  direction["log_source"] <- 1
+  direction["log_road:log_source"] <- log1p(road_reference)
+  distance <- seq(25, 75, by = .25)
+  difference <- log1p(distance) - log1p(25)
+  estimate <- 100 * difference * sum(direction * combined_beta)
+  se <- 100 * difference * sqrt(as.numeric(t(direction) %*% combined_V %*% direction))
+  tibble(side = side, source_distance_m = distance, estimate_pp = estimate,
+    low_pp = estimate - combined_critical * se,
+    high_pp = estimate + combined_critical * se)
+}))
+combined_endpoints <- combined_curves %>% filter(source_distance_m == 75)
+stopifnot(abs(combined_endpoints$estimate_pp[combined_endpoints$side == "Near"] -
+  combined_endpoints$estimate_pp[combined_endpoints$side == "Far"] -
+  combined_result2$estimate_pp) < 1e-10)
 ```
 
-These estimates do not show more conversion near either road group. However, **one 2019 fire contains 85.8% of the change**. Removing it reverses the traffic-road difference to +17.99 percentage points; only one remaining fire supports that distance contrast. We report no cell-based confidence intervals or p values: three changing fires are too few for reliable regional inference.
+```{r}
+#| label: poster-map-setup
+#| include: false
+library(sf)
+library(dplyr)
+library(png)
 
-The terrain check adds elevation and slope. The full check also adds climate, the 2015 planting label and 2017 fire severity, using 148.21 ha with complete data. Current-fire severity is missing. These maps cannot establish whether planting, mixed stands or natural recruitment explain the change, or whether the pine-to-eucalyptus switch happened before or after the fire. There is no unburned control for a fire effect.
+poster_map_file <- file.path("Raw Data", "poster_map_inputs.gpkg")
+poster_layer <- function(layer) read_sf(poster_map_file, layer)
+poster_frames <- poster_layer("frames")
+poster_frame <- function(id) st_bbox(poster_frames %>% filter(frame == id))
+poster_window <- function(bb) {
+  plot.new()
+  plot.window(xlim = bb[c("xmin", "xmax")],
+              ylim = bb[c("ymin", "ymax")], asp = 1)
+}
+poster_scale <- function(bb, metres = 100, label_cex = 0.9) {
+  s <- bb["xmax"] - bb["xmin"]
+  x <- bb["xmin"] + 0.045 * s
+  y <- bb["ymin"] + 0.045 * s
+  rect(x - 0.02 * s, y - 0.022 * s, x + metres + 0.025 * s,
+       y + 0.10 * s, col = "white", border = NA)
+  segments(x, y, x + metres, y, lwd = 2)
+  text(x + metres / 2, y + 0.05 * s, paste(metres, "m"), cex = label_cex)
+  text(bb["xmax"] - 0.045 * s, bb["ymax"] - 0.04 * s,
+       "N", font = 2, cex = label_cex)
+  arrows(bb["xmax"] - 0.045 * s, bb["ymax"] - 0.11 * s,
+         bb["xmax"] - 0.045 * s, bb["ymax"] - 0.065 * s,
+         length = 0.05, lwd = 1.3)
+}
+```
+
+```{r}
+#| label: fig-poster-method
+#| fig-width: 4.2
+#| out-width: 3.7in
+#| fig-align: center
+#| fig-height: 8.5
+#| fig-cap: "The same map window in three steps: baseline eucalyptus, eligible land divided into 20 m accounting cells, and mapped eucalyptus gain. The cells keep their actual eligible area; they are not individual trees. This example illustrates the workflow and is not an effect estimate."
+method_bb <- poster_frame("method")
+method_forest <- poster_layer("method_forest")
+method_cells <- poster_layer("method_fragments")
+method_gain <- poster_layer("method_gain")
+method_roads <- poster_layer("method_roads")
+method_col <- c(old = "#75A883", eligible = "#EBCF95",
+                gain = "#AF2A70", road = "#3A4048")
+
+local({
+  old_par <- par(no.readonly = TRUE)
+  on.exit({layout(1); par(old_par)})
+  layout(matrix(1:4, 4, 1), heights = c(1, 1, 1, 0.24))
+  par(cex = 1, family = "sans", oma = rep(0, 4))
+  for (step in 1:3) {
+    par(mar = c(0.15, 0.3, 1.8, 0.3), xaxs = "i", yaxs = "i", pty = "s")
+    poster_window(method_bb)
+    rect(method_bb["xmin"], method_bb["ymin"], method_bb["xmax"],
+         method_bb["ymax"], col = "#F4F5F4", border = NA)
+    plot(st_geometry(method_forest), add = TRUE, col = method_col["old"],
+         border = "#52775C", lwd = 0.7)
+    if (step >= 2) plot(st_geometry(method_cells), add = TRUE,
+                        col = method_col["eligible"],
+                        border = if (step == 2) "#A69D87" else NA, lwd = 0.5)
+    if (step == 3) plot(st_geometry(method_gain), add = TRUE,
+                        col = method_col["gain"], border = NA)
+    plot(st_geometry(method_roads), add = TRUE, col = method_col["road"], lwd = 1.3)
+    poster_scale(method_bb)
+    box(col = "#BCC5CB")
+    title(c("1  Baseline forest", "2  Eligible grid cells", "3  Mapped gain")[step],
+          line = 0.5, cex.main = 1, col.main = "#163F50")
+  }
+  par(mar = rep(0, 4), pty = "m")
+  plot.new()
+  legend("center", legend = c("2018 eucalyptus", "Eligible land", "Mapped gain", "Roads"),
+         pch = c(15, 15, 15, NA), lty = c(NA, NA, NA, 1),
+         col = unname(method_col), ncol = 2, bty = "n", cex = 0.9)
+})
+```
+
+The complete-environment model contains **`r format(round(sum(combined_data$area_ha)), big.mark = ",")` ha** of eligible land and **`r round(sum(combined_data$gain_m2) / 10000)` ha** of mapped gain. The near and far road references are **`r round(combined_q[1])` m** and **`r round(combined_q[3])` m**, respectively. Middle distances remain in the continuous model. Result 1 is reported for source/cover groups spanning both road references. Result 2 also requires source distances to span 25–75 m at both road-distance ends.
 
 \newpage
 
-## Checks and limits
-
-The following checks keep the same baseline reference distances. All entries are percentage-point differences. T = traffic roads; A = land-access routes. Result 1 is nearer minus farther. Result 2 is the difference in the 25-to-75 m source-distance change.
+## Result 1: more gain near roads?
 
 ```{r}
-#| label: selected-sensitivity-table
-sensitivity %>% filter(block=="block2" | block=="point estimate only") %>%
-  mutate(Analysis=recode(model,`Joint roads, 100 m`="Main, 100 m",`Joint roads, 200 m`="Wider, 200 m",
-    `Tracks as access routes`="Tracks only for access",`No unknown service subtype`="No unknown services",
-    `No explicit motor bans`="No motor bans",`Fractional logit, informative land`="Bounded, changing groups",
-    `Linear model, same informative land`="Linear, same groups"),
-    key=paste0(ifelse(road=="traffic","T","A"),ifelse(result=="Result 1","1","2")),value=pp(estimate)) %>%
-  select(Analysis,key,value) %>% pivot_wider(names_from=key,values_from=value) %>%
-  select(Analysis,T1,A1,T2,A2) %>% knitr::kable(format="pipe",align=c("l","r","r","r","r"))
+#| label: fig-poster-comparison
+#| fig-width: 6.5
+#| fig-height: 5.4
+#| fig-cap: "One baseline eucalyptus patch and eligible maritime-pine land within 100 m. Blue and orange show land closer to and farther from the included road network, using the baseline area-weighted 25th and 75th percentiles (about 36 and 169 m). Grey land also enters the continuous-distance model. This is an illustration of the comparison, not a separate local result or exact environmental matching."
+comparison_bb <- poster_frame("comparison")
+comparison_source <- poster_layer("comparison_source")
+comparison_cells <- poster_layer("comparison_fragments")
+comparison_roads <- poster_layer("comparison_roads")
+comparison_col <- c(Source = "#78A58A", Near = "#0072B2", Middle = "#CDD1D5",
+                    Far = "#D55E00", Road = "#263238")
+local({
+  old_par <- par(no.readonly = TRUE)
+  on.exit({layout(1); par(old_par)})
+  layout(matrix(1:2, 2, 1), heights = c(8, 1.35))
+  par(mar = c(0.1, 0.1, 0.1, 0.1), xaxs = "i", yaxs = "i", family = "sans")
+  poster_window(comparison_bb)
+  rect(comparison_bb["xmin"], comparison_bb["ymin"], comparison_bb["xmax"],
+       comparison_bb["ymax"], col = "#F8FAF9", border = NA)
+  plot(st_geometry(comparison_source), add = TRUE, col = comparison_col["Source"],
+       border = "#49735B", lwd = 1.3)
+  plot(st_geometry(comparison_cells), add = TRUE,
+       col = unname(comparison_col[comparison_cells$distance_group]), border = "white", lwd = 0.5)
+  plot(st_geometry(comparison_roads), add = TRUE, col = comparison_col["Road"], lwd = 2)
+  poster_scale(comparison_bb, 50)
+  box(col = "#D4DDD8")
+  par(mar = rep(0, 4))
+  plot.new()
+  legend("center", legend = c("Old forest", "Near <=36 m", "Far >=169 m", "Middle", "Roads"),
+         pch = c(15, 15, 15, 15, NA), lty = c(NA, NA, NA, NA, 1),
+         col = comparison_col[c("Source", "Near", "Far", "Middle", "Road")],
+         ncol = 3, bty = "n", cex = 0.95)
+})
 ```
 
-Changing the road definition did not reveal a stable positive relationship. The bounded model uses only 367 source/cover groups with some conversion: 7,575 ha from 291 source features. The last row fits the linear model to exactly that same land. This separates a change in sample from a change in model. The bounded row gives point estimates only.
+Across the supported land, the adjusted near-minus-far difference was **`r sprintf("%+.2f", combined_result1$estimate_pp)` percentage points** (95% CI: `r sprintf("%+.2f", combined_result1$low_pp)` to `r sprintf("%+.2f", combined_result1$high_pp)`). The comparison covers `r combined_result1$reference_sources` source features and `r format(round(combined_result1$reference_area_ha), big.mark = ",")` ha. This does not clearly support more gain near roads. The map illustrates the comparison around one source; the estimate comes from the regional model.
 
-The main linear model puts **`r sprintf("%.1f",diagnostics$weighted_outside_0_1_pct[1])`%** of fitted land area outside the 0--1 range. This limits its use to adjusted differences, not absolute predictions. We did not clip predictions. The distance relationships and environmental adjustments are model assumptions, not experimentally verified controls.
+\newpage
 
-Uncertainty allows shared source features and shared 2 km geographic blocks. Using 1 km and 4 km blocks also left all four primary intervals spanning zero. The 4 km covariance calculation needed a numerical correction, which widened the traffic-road intervals. The main 2 km calculation did not need it. These block sizes handle correlated errors; they are not seed-dispersal distances. Deleting one source at a time gave Result 1 ranges of -0.26 to +0.05 points (traffic) and -0.57 to -0.06 (access). Result 2 stayed +0.04 to +0.11 (traffic) and -0.10 to -0.02 (access). These are influence checks, not uncertainty intervals.
+## Result 2: a slower decline near roads?
 
-**Several explanations remain open.** Road access may support planting, harvesting and replanting as well as natural recruitment. Pine-labelled forest can already contain eucalyptus; fire and resprouting may change the dominant cover. Farming and abandonment, soils, drainage, weather during seed release, road maintenance and traffic are not fully measured. The coarse 2015 planting label does not verify whether a particular new patch was planted.
+```{r}
+#| label: fig-poster-result2
+#| fig-width: 6.9
+#| fig-height: 5.32
+#| fig-cap: "Adjusted change in mapped gain relative to 25 m from old forest, at near and far road references. Shading shows 95% confidence intervals. Both curves start at zero by definition; they are changes, not absolute probabilities."
+curves <- combined_curves
+reference <- tibble(nearer_m = combined_q[1], farther_m = combined_q[3])
+cols<-c(Near='#0072B2',Far='#D55E00');ltys<-c(Near=1,Far=2)
+range_raw<-range(c(curves$low_pp,curves$high_pp,0));span<-diff(range_raw)
+ylim<-range_raw+c(-.045,.045)*span;ticks<-pretty(range_raw,n=5)
 
-Seven years can reveal mapped cover change, but not every new seedling becomes detectable. COS includes young stands capable of reaching forest conditions and does not count individual trees. Across the road definitions, distance windows and models checked here, we did not find stable support for either original prediction. Some estimates point in the predicted direction, but uncertainty or model sensitivity prevents a clear conclusion. This does not cover every possible method or show that roads have no effect. The maps measure forest-cover change, not natural seed dispersal itself.
+draw <- function() {
+  par(family='sans',mar=c(3.5,4.8,2.7,.8),mgp=c(3,.8,0),xaxs='i',yaxs='i')
+  plot(NA,xlim=c(25,75),ylim=ylim,axes=FALSE,xlab='',ylab='')
+  abline(h=ticks,col='#E7ECEF',lwd=.8);abline(v=c(25,50,75),col='#F0F3F5',lwd=.7)
+  for(side in names(cols)) {
+    z<-curves %>% filter(.data$side==!!side)
+    polygon(c(z$source_distance_m,rev(z$source_distance_m)),c(z$low_pp,rev(z$high_pp)),
+      col=adjustcolor(cols[side],.16),border=NA)
+  }
+  abline(h=0,col='#7B858D',lty=3,lwd=1.2)
+  for(side in names(cols)) {
+    z<-curves %>% filter(.data$side==!!side)
+    lines(z$source_distance_m,z$estimate_pp,col=cols[side],lty=ltys[side],lwd=2.7)
+  }
+  axis(1,at=c(25,50,75),labels=c('25','50','75'),col=NA,col.ticks='#A6AFB6',col.axis='#35434C',cex.axis=.96,tck=-.018)
+  axis(2,at=ticks[ticks>=ylim[1]&ticks<=ylim[2]],las=1,col=NA,col.ticks='#A6AFB6',col.axis='#35434C',cex.axis=.96,tck=-.014)
+  mtext('Distance from old forest (m)',side=1,line=2.25,cex=1,col='#223541')
+  mtext('Change in gain (pp)',side=2,line=3.35,cex=1,col='#223541')
+  legend('top',inset=c(0,-.18),legend=c(sprintf('Near (%.0f m)',reference$nearer_m),
+    sprintf('Far (%.0f m)',reference$farther_m)),
+    col=cols,lty=ltys,lwd=2.7,horiz=TRUE,bty='n',xpd=NA,cex=.96,seg.len=1.8,x.intersp=.6)
+}
+
+draw()
+```
+
+Gain declined at nearly the same rate near and far from roads as source distance increased from 25 to 75 m. The near-minus-far difference in that change was **`r sprintf("%+.3f", combined_result2$estimate_pp)` percentage points** (95% CI: `r sprintf("%+.3f", combined_result2$low_pp)` to `r sprintf("%+.3f", combined_result2$high_pp)`). The supported population contains `r combined_result2$reference_sources` source features and `r format(round(combined_result2$reference_area_ha), big.mark = ",")` ha. This does not support a slower decline near roads. The interval is calculated for the contrast directly, rather than judged from overlap between the shaded bands.
+
+\newpage
+
+## Discussion: burned-site examples
+
+```{r}
+#| label: fig-poster-cases
+#| fig-width: 7
+#| fig-height: 4.4
+#| fig-cap: "Two exploratory sites on unchanged 2025 aerial images. Pink outlines show whole polygons mapped as maritime pine in 2018 and eucalyptus in 2025; green outlines show baseline eucalyptus. Site A is beside a visible passage and only partly overlaps the 2022 fire. Site B is beside old eucalyptus. These images do not establish natural spread, planting history, or whether conversion occurred after the fire."
+local({
+  old_par <- par(no.readonly = TRUE)
+  on.exit({layout(1); par(old_par)})
+  layout(matrix(c(1, 2, 3, 3), 2, 2, byrow = TRUE), heights = c(1, 0.20))
+  par(cex = 1, oma = rep(0, 4), family = "sans")
+  green <- "#83F25A"; pink <- "#E80079"; yellow <- "#FFCE1C"; orange <- "#FF9E38"
+  for (id in c("a", "b")) {
+    bb <- poster_frame(paste0("case_", id))
+    s <- bb["xmax"] - bb["xmin"]
+    transition <- poster_layer(paste0("case_", id, "_full_transition"))
+    forest <- poster_layer(paste0("case_", id, "_euc2018"))
+    roads <- poster_layer(paste0("case_", id, "_roads"))
+    fire <- poster_layer(paste0("case_", id, "_fire_boundary"))
+    aerial <- readPNG(file.path("Raw Data", paste0("poster_case_", id, "_2025.png")))
+    par(mar = c(0.1, 0.25, 1.8, 0.25), xaxs = "i", yaxs = "i", pty = "s")
+    poster_window(bb)
+    rasterImage(aerial, bb["xmin"], bb["ymin"], bb["xmax"], bb["ymax"], interpolate = FALSE)
+    plot(st_geometry(forest), add = TRUE, col = adjustcolor(green, 0.08), border = green, lwd = 1.2)
+    plot(st_geometry(fire), add = TRUE, col = orange, lwd = 1.7, lty = 2)
+    plot(st_geometry(roads), add = TRUE, col = yellow, lwd = 1.6)
+    plot(st_geometry(transition), add = TRUE, col = NA, border = "white", lwd = 3.5)
+    plot(st_geometry(transition), add = TRUE, col = NA, border = pink, lwd = 2)
+    title(if (id == "a") "A | Beside a passage" else "B | Beside old forest",
+          line = 0.5, cex.main = 0.95, col.main = "#183D4B")
+    x <- bb["xmin"] + 0.04 * s; y <- bb["ymin"] + 0.04 * s
+    rect(x - 0.01 * s, y - 0.015 * s, x + 50 + 0.025 * s, y + 0.065 * s,
+         col = adjustcolor("white", 0.94), border = NA)
+    segments(x, y, x + 50, y, lwd = 2)
+    text(x + 25, y + 0.035 * s, "50 m", cex = 0.8)
+    xn <- bb["xmax"] - 0.04 * s; yn <- bb["ymax"] - 0.035 * s
+    text(xn, yn, "N", col = "white", font = 2, cex = 0.8)
+    arrows(xn, yn - 0.065 * s, xn, yn - 0.018 * s, length = 0.045, lwd = 1.5, col = "white")
+    if (id == "a") {
+      x1 <- bb["xmin"] + 0.15 * s; y1 <- bb["ymin"] + 0.72 * s
+      arrows(x1, y1 - 0.035 * s, bb["xmin"] + 0.496 * s, bb["ymin"] + 0.57 * s,
+             length = 0.08, col = "white", lwd = 1.8)
+      rect(x1 - 0.13 * s, y1 - 0.03 * s, x1 + 0.13 * s, y1 + 0.035 * s,
+           col = adjustcolor("black", 0.75), border = NA)
+      text(x1, y1, "Passage", cex = 0.8, col = "white")
+    }
+    box(col = "#B5BEC7")
+  }
+  par(mar = rep(0, 4), pty = "m")
+  plot.new()
+  plot.window(xlim = c(0, 1), ylim = c(0, 1), xaxs = "i", yaxs = "i")
+  rect(0.02, 0.60, 0.055, 0.84, col = adjustcolor(green, 0.10), border = green, lwd = 2)
+  text(0.07, 0.72, "Eucalyptus in 2018", adj = 0, col = "#2B641C", cex = 0.82)
+  rect(0.48, 0.60, 0.515, 0.84, col = NA, border = pink, lwd = 2)
+  text(0.53, 0.72, "Pine 2018 to eucalyptus 2025", adj = 0, col = "#AB0059", cex = 0.82)
+  segments(0.02, 0.25, 0.055, 0.25, col = "#776322", lwd = 4)
+  segments(0.02, 0.25, 0.055, 0.25, col = yellow, lwd = 2)
+  text(0.07, 0.25, "Roads mapped in 2018", adj = 0, col = "#765700", cex = 0.82)
+  segments(0.48, 0.25, 0.515, 0.25, col = orange, lwd = 2, lty = 2)
+  text(0.53, 0.25, "2022 fire boundary", adj = 0, col = "#924900", cex = 0.82)
+})
+```
+
+Both sites were mapped as maritime pine in 2018 and eucalyptus in 2025. Site A lies beside a visible passage and partly overlaps the 2022 fire footprint; site B lies beside old eucalyptus. Both were also within the 2017 fire footprint. These are selected examples for examining alternative explanations, not an independent test of a road effect.
+
+Nearby seed sources, natural establishment, surviving trees and regrowth, planting, and post-fire management could each produce the observed forest changes. The maps do not date the conversion within 2018–2025, so the 2022 fire cannot automatically be treated as its cause. Neither location has a verified planting history. Coarse management labels cannot resolve this at individual patches. Agricultural abandonment, soils, drainage, road maintenance and actual traffic are further possible influences that are not fully measured.
+
+Neither original road prediction was supported by this analysis. This does not establish that roads have no effect: the observations concern mapped forest-cover change, not tracked seed movement or confirmed natural colonisation. Dated establishment and planting records would help separate natural spread from forest management and recovery.
+
+## Model checks and limits
+
+The linear model puts **`r sprintf("%.1f", combined_outside_pct)`%** of fitted land area outside the 0–1 range. Its contrasts should therefore not be read as reliable absolute probabilities. We compare the same linear model with a bounded fractional model on groups containing both changed and unchanged land. All zero- and complete-gain fragments inside these retained groups stay in the analysis.
+
+```{r}
+#| label: combined-bounded-check
+#| include: false
+combined_informative <- combined_data %>%
+  group_by(stratum, source_id) %>%
+  summarise(eligible_ha = sum(area_ha), gain_ha = sum(gain_m2) / 10000,
+    .groups = "drop") %>%
+  filter(gain_ha > 1e-9, gain_ha < eligible_ha - 1e-9)
+combined_bounded_input <- combined_data %>%
+  filter(stratum %in% combined_informative$stratum)
+combined_bounded <- feglm(formula(combined_fit), data = combined_bounded_input,
+  family = quasibinomial(), weights = ~area_ha, vcov = ~source_id + block2,
+  glm.iter = 100, data.save = TRUE)
+combined_same_data <- combined_bounded_input[fixest::obs(combined_bounded), ]
+combined_same_fit <- feols(formula(combined_fit), data = combined_same_data,
+  weights = ~area_ha, vcov = ~source_id + block2, fixef.rm = "none")
+stopifnot(nobs(combined_same_fit) == nobs(combined_bounded), combined_bounded$convStatus)
+
+# Recheck support after any bounded-model row removal.
+combined_same_support <- combined_same_data %>%
+  group_by(stratum, source_id) %>%
+  summarise(
+    road_min = min(road_m), road_max = max(road_m),
+    near_source_min = if (any(road_m <= combined_q[1]))
+      min(source_m[road_m <= combined_q[1]]) else Inf,
+    near_source_max = if (any(road_m <= combined_q[1]))
+      max(source_m[road_m <= combined_q[1]]) else -Inf,
+    far_source_min = if (any(road_m >= combined_q[3]))
+      min(source_m[road_m >= combined_q[3]]) else Inf,
+    far_source_max = if (any(road_m >= combined_q[3]))
+      max(source_m[road_m >= combined_q[3]]) else -Inf,
+    .groups = "drop") %>%
+  filter(road_min <= combined_q[1], road_max >= combined_q[3],
+    near_source_min <= 25, near_source_max >= 75,
+    far_source_min <= 25, far_source_max >= 75)
+combined_same_target <- combined_same_data %>%
+  filter(stratum %in% combined_same_support$stratum)
+
+combined_same_beta <- coef(combined_same_fit)
+combined_same_V <- vcov(combined_same_fit, vcov = ~source_id + block2)
+combined_same_c <- setNames(rep(0, length(combined_same_beta)), names(combined_same_beta))
+combined_same_c["log_road:log_source"] <- combined_dx * (log1p(75) - log1p(25))
+combined_same_est <- 100 * sum(combined_same_c * combined_same_beta)
+combined_same_se <- 100 * sqrt(as.numeric(
+  t(combined_same_c) %*% combined_same_V %*% combined_same_c))
+combined_same_df <- min(n_distinct(combined_same_data$source_id),
+  n_distinct(combined_same_data$block2)) - 1
+combined_same_critical <- qt(.975, combined_same_df)
+
+# For the nonlinear model, average predictions over the same supported land.
+combined_bounded_means <- bind_rows(lapply(c("Near", "Far"), function(side) {
+  bind_rows(lapply(c(25, 75), function(distance) {
+    new_land <- combined_same_target
+    new_land$log_road <- log1p(if (side == "Near") combined_q[1] else combined_q[3])
+    new_land$log_source <- log1p(distance)
+    predicted <- predict(combined_bounded, newdata = new_land, type = "response")
+    tibble(side = side, source_distance_m = distance,
+      mean_gain = weighted.mean(predicted, new_land$area_ha))
+  }))
+}))
+combined_bounded_changes <- combined_bounded_means %>%
+  group_by(side) %>%
+  summarise(change = mean_gain[source_distance_m == 75] -
+    mean_gain[source_distance_m == 25], .groups = "drop")
+combined_bounded_est <- 100 * (
+  combined_bounded_changes$change[combined_bounded_changes$side == "Near"] -
+  combined_bounded_changes$change[combined_bounded_changes$side == "Far"])
+
+combined_check_results <- bind_rows(
+  combined_result2 %>% mutate(model = "Linear: all eligible land"),
+  bind_cols(tibble(model = "Linear: informative groups",
+    estimate_pp = combined_same_est,
+    low_pp = combined_same_est - combined_same_critical * combined_same_se,
+    high_pp = combined_same_est + combined_same_critical * combined_same_se),
+    combined_target_summary(combined_same_target)),
+  bind_cols(tibble(model = "Bounded: same informative groups",
+    estimate_pp = combined_bounded_est, low_pp = NA_real_, high_pp = NA_real_),
+    combined_target_summary(combined_same_target)))
+```
+
+```{r}
+#| label: combined-model-check-table
+#| echo: false
+combined_check_results %>%
+  transmute(Model = model, `Result 2 (pp)` = round(estimate_pp, 3),
+    `95% interval (pp)` = if_else(is.na(low_pp), "Not calculated",
+      sprintf("%.3f to %.3f", low_pp, high_pp)),
+    `Supported area (ha)` = round(reference_area_ha),
+    `Source features` = reference_sources) %>%
+  knitr::kable()
+```
+
+Changing the included source/cover groups also changes the linear estimate. The bounded fit uses that same smaller population and gives a point estimate without a confidence interval. It does not establish either robust support for a road effect or equivalence between near and far land.
+
+The official maps describe dominant cover classes, including young stands, rather than individual trees. Classification changes and mixed stands can contribute to a mapped transition. A 20 m accounting grid does not improve the source map's detail, and climate cells remain much larger than these accounting cells.
+
+## Reproduction and software
+
+Run `quarto render analysis.qmd` from the repository root after installing the packages listed in README. The spatial and model inputs use relative `Raw Data/` paths. The WorldClim pilot file downloads automatically on its first use. Exact package versions are listed in README; this chunk records the current rendering session in the ignored cache. No random sampling is used, and the seed is fixed at 6130.
+
+```{r}
+#| label: record-session
+#| include: false
+writeLines(capture.output(sessionInfo()), file.path(analysis_cache, "session-info.txt"))
+readr::write_csv(combined_results, file.path(analysis_cache, "poster-results.csv"))
+readr::write_csv(combined_check_results, file.path(analysis_cache, "poster-model-checks.csv"))
+```
 
 \newpage
 
@@ -1255,7 +1125,7 @@ Seven years can reveal mapped cover change, but not every new seedling becomes d
 ## Data sources
 
 - **Land cover and the pilot road.** Direção-Geral do Território (DGT), COS Series 2, [2018 v4](https://ogcapi.dgterritorio.gov.pt/collections/cos2018v4) and [2025 v1](https://ogcapi.dgterritorio.gov.pt/collections/cos2025v1). The maps use eucalyptus class 5.1.1.6 and maritime pine class 5.1.2.1. The regional `pine2025.gpkg` file contains the 2025 maritime-pine polygons clipped to the same study area. [DGT class definitions and imagery dates](https://geo2.dgterritorio.gov.pt/cos/ET/COS-Serie2-EspecificacoesTecnicas.pdf). [DGT, CC BY 4.0](https://www.dgterritorio.gov.pt/dados-abertos)
-- **Regional roads.** The original network is retained in `roads.gpkg`. The revised `roads2018_selected.gpkg` comes from the 1 January 2018 archive and separates traffic roads from tracks and selected service roads. Private access is retained. © OpenStreetMap contributors. [Geofabrik archive](https://download.geofabrik.de/europe/portugal.html); [track](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrack), [service](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dservice) and [access definitions](https://wiki.openstreetmap.org/wiki/Key:access); [ODbL 1.0](https://www.openstreetmap.org/copyright).
+- **Regional roads.** The original network is retained in `roads.gpkg`. The revised `roads2018_selected.gpkg` comes from the 1 January 2018 archive and records traffic roads, tracks and selected service roads; the current model combines these into one distance. Private access is retained. © OpenStreetMap contributors. [Geofabrik archive](https://download.geofabrik.de/europe/portugal.html); [track](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrack), [service](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dservice) and [access definitions](https://wiki.openstreetmap.org/wiki/Key:access); [ODbL 1.0](https://www.openstreetmap.org/copyright).
 - **Pilot aerial photos.** DGT imagery from 2018 and 2025, exported at 2 m for area B. [DGT orthophotos, CC BY 4.0](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-topografica/ortofotos/ortofotos-digitais)
 - **Pilot climate.** WorldClim v2.1, temperature and rainfall averages for 1970–2000. [WorldClim](https://www.worldclim.org/data/worldclim21.html) · [Fick and Hijmans (2017)](https://doi.org/10.1002/joc.5086)
 - **Regional climate.** CHELSA v2.1, temperature, rainfall and mean near-surface wind speed for 1981–2010. [CHELSA](https://www.chelsa-climate.org/datasets/chelsa_bioclim) · [BIOCLIM+ data, CC0](https://doi.org/10.16904/envidat.332)
@@ -1267,7 +1137,27 @@ Seven years can reveal mapped cover change, but not every new seedling becomes d
 
 Produced using Copernicus WorldDEM-30 © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018 provided under COPERNICUS by the European Union and ESA; all rights reserved. The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30.
 
+The poster maps use `poster_map_inputs.gpkg`, a small derived snapshot of the
+reviewed map inputs, and two unchanged 2025 orthophoto PNGs. The GeoPackage keeps
+the real 20 m eligible fragments, baseline forest, complete case-transition
+polygons, selected roads, map frames, and the actual fire perimeter. It contains
+no new field observations. The map code reads these files directly from
+`Raw Data`; no files from the working folder are needed.
+
+Forest classes are from [DGT COS2018v4](https://ogcapi.dgterritorio.gov.pt/collections/cos2018v4)
+and [COS2025v1](https://ogcapi.dgterritorio.gov.pt/collections/cos2025v1).
+The aerial images are from [DGT orthophotos](https://www.dgterritorio.gov.pt/atividades/cartografia/cartografia-topografica/ortofotos/ortofotos-digitais).
+DGT data are credited under CC BY 4.0. Roads are from OpenStreetMap contributors,
+under [ODbL 1.0](https://www.openstreetmap.org/copyright). Fire perimeters are from
+[ICNF](https://sigservices.icnf.pt/server/rest/services/BDG/areas_ardidas/FeatureServer),
+subject to [ICNF reuse terms](https://geocatalogo.icnf.pt/dados/condicoes_utilizacao.pdf).
+These source licences still apply to the derived map inputs; the repository's
+code licence does not replace them.
+
 ### Research papers
+
+- **Road corridors.** Lemke et al. (2019). [Journal of Applied Ecology](https://doi.org/10.1111/1365-2664.13287).
+- **Vehicle seed movement.** von der Lippe et al. (2013). [PLOS ONE](https://doi.org/10.1371/journal.pone.0052733).
 
 - **Field distance.** Deus et al. (2019). Wild eucalyptus at and beyond plantation edges in Portugal. [Biological Invasions](https://doi.org/10.1007/s10530-019-01954-6)
 - **Source distance in a mapping study.** Deus et al. (2022). Potential eucalyptus recruitment in Iberian protected areas. [Forests](https://doi.org/10.3390/f13081199)
