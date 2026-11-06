@@ -50,4 +50,4 @@ The first render computes the spatial overlays and models and creates `analysis.
 
 # Generative AI Use
 
-ChatGPT and OpenAI Codex were used to help set up folders, find and download data and literature, write and revise R code, debug the analysis, prepare figures and the poster layout, and draft and revise the abstract, poster text and interpretations.
+ChatGPT and OpenAI Codex were used to help set up folders, find and download data and literature, write and revise R code, debug the analysis, prepare figures and the poster layout,  revise the text.
